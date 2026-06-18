@@ -49,6 +49,8 @@ const providerKinds = [
   ["home_assistant_mcp", "Home Assistant MCP", Home],
 ];
 
+const protectedIntegrationIds = ["gemini", "openai", "ha-mcp"];
+
 const stepTypes = [
   ["transport", "Transport", Radio],
   ["vad", "Turn", Mic2],
@@ -265,6 +267,36 @@ function secretValue(value) {
   return value === REDACTED ? "" : value || "";
 }
 
+function secretStatus(item, key) {
+  if (!item) return "missing";
+  if (item[`${key}_configured`] || item[key] === REDACTED) return "configured";
+  return secretValue(item[key]) ? "pending" : "missing";
+}
+
+function secretPlaceholder(item, key, fallback = "") {
+  return secretStatus(item, key) === "configured" ? "configured" : fallback;
+}
+
+function integrationSummary(integration) {
+  if (!integration.enabled) return "disabled";
+  if (integration.kind === "home_assistant_mcp") {
+    return secretStatus(integration, "token") === "configured" ? "token saved" : "token missing";
+  }
+  if (["gemini", "openai", "anthropic", "azure_openai"].includes(integration.kind)) {
+    const status = secretStatus(integration, "api_key");
+    if (status === "configured") return "API key saved";
+    if (status === "pending") return "save pending";
+    return "API key missing";
+  }
+  if (integration.kind === "aws_bedrock") {
+    return integration.region ? `region ${integration.region}` : "region missing";
+  }
+  if (["ollama", "openai_compatible", "local_runtime"].includes(integration.kind)) {
+    return integration.base_url || integration.endpoint || "endpoint missing";
+  }
+  return kindLabel(integration.kind);
+}
+
 function stepIcon(kind) {
   return stepTypes.find(([id]) => id === kind)?.[2] || Workflow;
 }
@@ -478,7 +510,7 @@ function App() {
   }
 
   function deleteIntegration(integrationId) {
-    if (["gemini", "openai", "ha-mcp"].includes(integrationId)) return;
+    if (protectedIntegrationIds.includes(integrationId)) return;
     updateConfig((draft) => {
       draft.integrations = draft.integrations.filter((item) => item.id !== integrationId);
       draft.flows = draft.flows.map((flow) => ({
@@ -936,7 +968,7 @@ function IntegrationsView({
                 <Icon size={20} />
                 <span>
                   <strong>{integration.name}</strong>
-                  <small>{kindLabel(integration.kind)}</small>
+                  <small>{integrationSummary(integration)}</small>
                 </span>
                 <span className={integration.enabled ? "dot on" : "dot"} />
               </button>
@@ -946,7 +978,7 @@ function IntegrationsView({
       </section>
 
       {selectedIntegration && (
-        <section className="panel inspector">
+        <section className="panel inspector integration-editor">
           <div className="panel-head">
             <div>
               <h3>{selectedIntegration.name}</h3>
@@ -956,123 +988,216 @@ function IntegrationsView({
               icon={Trash2}
               variant="danger"
               onClick={() => deleteIntegration(selectedIntegration.id)}
-              disabled={["gemini", "openai", "ha-mcp"].includes(selectedIntegration.id)}
+              disabled={protectedIntegrationIds.includes(selectedIntegration.id)}
             />
           </div>
 
-          <div className="form-grid">
-            <Field label="Name">
-              <input
-                value={selectedIntegration.name}
-                onChange={(event) => updateIntegration(selectedIntegration.id, (item) => ({ ...item, name: event.target.value }))}
-              />
-            </Field>
-            <Field label="ID">
-              <input
-                value={selectedIntegration.id}
-                readOnly
-              />
-            </Field>
-            <Field label="Kind">
-              <select
-                value={selectedIntegration.kind}
-                onChange={(event) => updateIntegration(selectedIntegration.id, (item) => ({ ...item, kind: event.target.value }))}
-                disabled={selectedIntegration.id === "ha-mcp"}
-              >
-                {providerKinds.map(([id, label]) => (
-                  <option key={id} value={id}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Toggle
-              checked={selectedIntegration.enabled}
-              onChange={(value) => updateIntegration(selectedIntegration.id, (item) => ({ ...item, enabled: value }))}
-              label="Enabled"
-            />
-            <Field label="API key">
-              <input
-                type="password"
-                value={secretValue(selectedIntegration.api_key)}
-                placeholder={selectedIntegration.api_key_configured ? "configured" : ""}
-                onChange={(event) => updateIntegration(selectedIntegration.id, (item) => ({ ...item, api_key: event.target.value }))}
-              />
-            </Field>
-            <Field label="Token">
-              <input
-                type="password"
-                value={secretValue(selectedIntegration.token)}
-                placeholder={selectedIntegration.token_configured ? "configured" : ""}
-                onChange={(event) => updateIntegration(selectedIntegration.id, (item) => ({ ...item, token: event.target.value }))}
-              />
-            </Field>
-            <Field label="Base URL">
-              <input
-                value={selectedIntegration.base_url || ""}
-                onChange={(event) => updateIntegration(selectedIntegration.id, (item) => ({ ...item, base_url: event.target.value }))}
-              />
-            </Field>
-            <Field label="Endpoint">
-              <input
-                value={selectedIntegration.endpoint || ""}
-                onChange={(event) => updateIntegration(selectedIntegration.id, (item) => ({ ...item, endpoint: event.target.value }))}
-              />
-            </Field>
-            <Field label="Default model">
-              <input
-                value={selectedIntegration.default_model || ""}
-                onChange={(event) => updateIntegration(selectedIntegration.id, (item) => ({ ...item, default_model: event.target.value }))}
-              />
-            </Field>
-            <Field label="Realtime model">
-              <input
-                value={selectedIntegration.default_realtime_model || ""}
-                onChange={(event) =>
-                  updateIntegration(selectedIntegration.id, (item) => ({ ...item, default_realtime_model: event.target.value }))
-                }
-              />
-            </Field>
-            <Field label="Voice">
-              <input
-                value={selectedIntegration.default_voice || ""}
-                onChange={(event) => updateIntegration(selectedIntegration.id, (item) => ({ ...item, default_voice: event.target.value }))}
-              />
-            </Field>
-            <Field label="Region">
-              <input
-                value={selectedIntegration.region || ""}
-                onChange={(event) => updateIntegration(selectedIntegration.id, (item) => ({ ...item, region: event.target.value }))}
-              />
-            </Field>
-            <Field label="Deployment">
-              <input
-                value={selectedIntegration.deployment || ""}
-                onChange={(event) => updateIntegration(selectedIntegration.id, (item) => ({ ...item, deployment: event.target.value }))}
-              />
-            </Field>
-            <Field label="Access key">
-              <input
-                type="password"
-                value={secretValue(selectedIntegration.access_key_id)}
-                placeholder={selectedIntegration.access_key_id_configured ? "configured" : ""}
-                onChange={(event) =>
-                  updateIntegration(selectedIntegration.id, (item) => ({ ...item, access_key_id: event.target.value }))
-                }
-              />
-            </Field>
-            <Field label="Secret key">
-              <input
-                type="password"
-                value={secretValue(selectedIntegration.secret_key)}
-                placeholder={selectedIntegration.secret_key_configured ? "configured" : ""}
-                onChange={(event) => updateIntegration(selectedIntegration.id, (item) => ({ ...item, secret_key: event.target.value }))}
-              />
-            </Field>
-          </div>
+          <IntegrationIdentity integration={selectedIntegration} updateIntegration={updateIntegration} />
+          <IntegrationSettings integration={selectedIntegration} updateIntegration={updateIntegration} />
         </section>
       )}
     </div>
+  );
+}
+
+function IntegrationIdentity({ integration, updateIntegration }) {
+  return (
+    <div className="settings-section">
+      <div className="section-title">
+        <strong>Identity</strong>
+        <span>{integration.enabled ? "enabled" : "disabled"}</span>
+      </div>
+      <div className="form-grid">
+        <Field label="Name">
+          <input
+            value={integration.name}
+            onChange={(event) => updateIntegration(integration.id, (item) => ({ ...item, name: event.target.value }))}
+          />
+        </Field>
+        <Field label="ID">
+          <input value={integration.id} readOnly />
+        </Field>
+        <Field label="Kind">
+          <select
+            value={integration.kind}
+            onChange={(event) => updateIntegration(integration.id, (item) => ({ ...item, kind: event.target.value }))}
+            disabled={protectedIntegrationIds.includes(integration.id)}
+          >
+            {providerKinds.map(([id, label]) => (
+              <option key={id} value={id}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Toggle
+          checked={integration.enabled}
+          onChange={(value) => updateIntegration(integration.id, (item) => ({ ...item, enabled: value }))}
+          label="Enabled"
+        />
+      </div>
+    </div>
+  );
+}
+
+function IntegrationSettings({ integration, updateIntegration }) {
+  if (integration.kind === "gemini") {
+    return (
+      <>
+        <SettingsSection title="Credentials" status={secretStatus(integration, "api_key")}>
+          <SecretSetting integration={integration} field="api_key" label="Gemini API key" updateIntegration={updateIntegration} />
+        </SettingsSection>
+        <SettingsSection title="Models">
+          <TextSetting integration={integration} field="default_realtime_model" label="Live model" updateIntegration={updateIntegration} />
+          <TextSetting integration={integration} field="default_model" label="Text model" updateIntegration={updateIntegration} />
+          <TextSetting integration={integration} field="default_voice" label="Voice" updateIntegration={updateIntegration} />
+        </SettingsSection>
+      </>
+    );
+  }
+
+  if (integration.kind === "openai") {
+    return (
+      <>
+        <SettingsSection title="Credentials" status={secretStatus(integration, "api_key")}>
+          <SecretSetting integration={integration} field="api_key" label="OpenAI API key" updateIntegration={updateIntegration} />
+        </SettingsSection>
+        <SettingsSection title="Models">
+          <TextSetting integration={integration} field="default_realtime_model" label="Realtime model" updateIntegration={updateIntegration} />
+          <TextSetting integration={integration} field="default_model" label="Text model" updateIntegration={updateIntegration} />
+          <TextSetting integration={integration} field="default_voice" label="Voice" updateIntegration={updateIntegration} />
+        </SettingsSection>
+      </>
+    );
+  }
+
+  if (integration.kind === "home_assistant_mcp") {
+    return (
+      <SettingsSection title="Home Assistant MCP" status={secretStatus(integration, "token")}>
+        <TextSetting integration={integration} field="base_url" label="MCP URL" updateIntegration={updateIntegration} />
+        <SecretSetting integration={integration} field="token" label="Access token" updateIntegration={updateIntegration} />
+      </SettingsSection>
+    );
+  }
+
+  if (integration.kind === "openai_compatible") {
+    return (
+      <>
+        <SettingsSection title="Endpoint">
+          <TextSetting integration={integration} field="base_url" label="Base URL" updateIntegration={updateIntegration} wide />
+          <SecretSetting integration={integration} field="api_key" label="API key" updateIntegration={updateIntegration} />
+        </SettingsSection>
+        <SettingsSection title="Models">
+          <TextSetting integration={integration} field="default_model" label="Text model" updateIntegration={updateIntegration} />
+          <TextSetting integration={integration} field="default_realtime_model" label="Realtime model" updateIntegration={updateIntegration} />
+        </SettingsSection>
+      </>
+    );
+  }
+
+  if (integration.kind === "ollama") {
+    return (
+      <SettingsSection title="Local model server">
+        <TextSetting integration={integration} field="base_url" label="Base URL" updateIntegration={updateIntegration} wide />
+        <TextSetting integration={integration} field="default_model" label="Model" updateIntegration={updateIntegration} />
+      </SettingsSection>
+    );
+  }
+
+  if (integration.kind === "local_runtime") {
+    return (
+      <SettingsSection title="Local runtime">
+        <TextSetting integration={integration} field="base_url" label="Base URL" updateIntegration={updateIntegration} />
+        <TextSetting integration={integration} field="endpoint" label="Endpoint" updateIntegration={updateIntegration} />
+        <TextSetting integration={integration} field="default_model" label="Model" updateIntegration={updateIntegration} />
+        <TextSetting integration={integration} field="default_voice" label="Voice" updateIntegration={updateIntegration} />
+      </SettingsSection>
+    );
+  }
+
+  if (integration.kind === "azure_openai") {
+    return (
+      <>
+        <SettingsSection title="Azure endpoint" status={secretStatus(integration, "api_key")}>
+          <TextSetting integration={integration} field="endpoint" label="Endpoint" updateIntegration={updateIntegration} wide />
+          <SecretSetting integration={integration} field="api_key" label="API key" updateIntegration={updateIntegration} />
+          <TextSetting integration={integration} field="deployment" label="Deployment" updateIntegration={updateIntegration} />
+        </SettingsSection>
+        <SettingsSection title="Models">
+          <TextSetting integration={integration} field="default_realtime_model" label="Realtime model" updateIntegration={updateIntegration} />
+          <TextSetting integration={integration} field="default_model" label="Text model" updateIntegration={updateIntegration} />
+          <TextSetting integration={integration} field="default_voice" label="Voice" updateIntegration={updateIntegration} />
+        </SettingsSection>
+      </>
+    );
+  }
+
+  if (integration.kind === "anthropic") {
+    return (
+      <SettingsSection title="Anthropic" status={secretStatus(integration, "api_key")}>
+        <SecretSetting integration={integration} field="api_key" label="API key" updateIntegration={updateIntegration} />
+        <TextSetting integration={integration} field="default_model" label="Model" updateIntegration={updateIntegration} />
+      </SettingsSection>
+    );
+  }
+
+  if (integration.kind === "aws_bedrock") {
+    return (
+      <>
+        <SettingsSection title="AWS">
+          <TextSetting integration={integration} field="region" label="Region" updateIntegration={updateIntegration} />
+          <TextSetting integration={integration} field="default_model" label="Model" updateIntegration={updateIntegration} />
+        </SettingsSection>
+        <SettingsSection title="Credentials" status={secretStatus(integration, "secret_key")}>
+          <SecretSetting integration={integration} field="access_key_id" label="Access key" updateIntegration={updateIntegration} />
+          <SecretSetting integration={integration} field="secret_key" label="Secret key" updateIntegration={updateIntegration} />
+        </SettingsSection>
+      </>
+    );
+  }
+
+  return (
+    <SettingsSection title={kindLabel(integration.kind)}>
+      <TextSetting integration={integration} field="base_url" label="Base URL" updateIntegration={updateIntegration} />
+      <SecretSetting integration={integration} field="api_key" label="API key" updateIntegration={updateIntegration} />
+      <TextSetting integration={integration} field="default_model" label="Model" updateIntegration={updateIntegration} />
+    </SettingsSection>
+  );
+}
+
+function SettingsSection({ title, status, children }) {
+  return (
+    <div className="settings-section">
+      <div className="section-title">
+        <strong>{title}</strong>
+        {status && <span>{status}</span>}
+      </div>
+      <div className="form-grid">{children}</div>
+    </div>
+  );
+}
+
+function TextSetting({ integration, field, label, updateIntegration, wide = false }) {
+  return (
+    <Field label={label} wide={wide}>
+      <input
+        value={integration[field] || ""}
+        onChange={(event) => updateIntegration(integration.id, (item) => ({ ...item, [field]: event.target.value }))}
+      />
+    </Field>
+  );
+}
+
+function SecretSetting({ integration, field, label, updateIntegration, wide = false }) {
+  return (
+    <Field label={label} wide={wide}>
+      <input
+        type="password"
+        value={secretValue(integration[field])}
+        placeholder={secretPlaceholder(integration, field)}
+        onChange={(event) => updateIntegration(integration.id, (item) => ({ ...item, [field]: event.target.value }))}
+      />
+    </Field>
   );
 }
 
@@ -1108,6 +1233,86 @@ function waitForIceGatheringComplete(peerConnection, timeoutMs = 2500) {
   });
 }
 
+function flowModelIntegration(config, flow) {
+  const modelStep = flow.steps?.find((step) => step.kind === "llm" && step.enabled);
+  const integrationId = modelStep?.integration_id || flow.provider_id;
+  return (
+    config.integrations.find((integration) => integration.id === integrationId) ||
+    config.integrations.find((integration) => integration.kind === integrationId) ||
+    null
+  );
+}
+
+function voiceReadiness(config, flow) {
+  if (!flow.enabled) {
+    return { ok: false, detail: "Selected pipeline is disabled." };
+  }
+
+  const integration = flowModelIntegration(config, flow);
+  if (!integration) {
+    return { ok: false, detail: "Selected pipeline has no model integration." };
+  }
+
+  if (!integration.enabled) {
+    return { ok: false, detail: `${integration.name} is disabled.` };
+  }
+
+  if (!["gemini", "openai"].includes(integration.kind)) {
+    return {
+      ok: false,
+      detail: `Voice test currently supports Gemini Live and OpenAI Realtime. Selected provider: ${kindLabel(integration.kind)}.`,
+    };
+  }
+
+  const keyStatus = secretStatus(integration, "api_key");
+  if (keyStatus === "missing") {
+    return {
+      ok: false,
+      detail: `${integration.name} API key is missing. Add it in Integrations, save, then retry.`,
+    };
+  }
+  if (keyStatus === "pending") {
+    return {
+      ok: false,
+      detail: `Save configuration before starting the voice test; the add-on cannot use the new ${integration.name} key yet.`,
+    };
+  }
+
+  const mcp = config.integrations.find((item) => item.kind === "home_assistant_mcp");
+  if (flow.mcp_enabled && secretStatus(mcp, "token") === "missing" && !config.longlived_token_configured) {
+    return {
+      ok: true,
+      detail: "Ready. Home Assistant MCP token is missing, so device tools may be unavailable.",
+    };
+  }
+
+  return { ok: true, detail: `Ready for ${integration.name}.` };
+}
+
+async function offerErrorMessage(response) {
+  const body = await response.text();
+  let detail = body;
+  try {
+    const parsed = JSON.parse(body);
+    detail = parsed.detail || parsed.error || body;
+  } catch {
+    detail = body;
+  }
+
+  if (response.status === 401) {
+    return "SmallWebRTC offer token was rejected. Reload the panel and retry after saving configuration.";
+  }
+  return detail || `SmallWebRTC offer failed with HTTP ${response.status}.`;
+}
+
+function friendlyWebRtcError(err) {
+  const message = err?.message || String(err);
+  if (message === "Failed to fetch") {
+    return "Could not reach the SmallWebRTC offer endpoint. Check that the add-on is running in Home Assistant Ingress.";
+  }
+  return message;
+}
+
 function VoiceTest({ config, flow }) {
   const audioRef = useRef(null);
   const channelRef = useRef(null);
@@ -1119,6 +1324,7 @@ function VoiceTest({ config, flow }) {
   const trackReadyRef = useRef(false);
   const [state, setState] = useState("idle");
   const [detail, setDetail] = useState("Ready");
+  const readiness = voiceReadiness(config, flow);
 
   useEffect(() => () => disposeSession(), []);
 
@@ -1163,6 +1369,13 @@ function VoiceTest({ config, flow }) {
   }
 
   async function startVoiceTest() {
+    const currentReadiness = voiceReadiness(config, flow);
+    if (!currentReadiness.ok) {
+      setState("error");
+      setDetail(currentReadiness.detail);
+      return;
+    }
+
     if (!navigator.mediaDevices?.getUserMedia) {
       setState("error");
       setDetail("This browser cannot access a microphone from the current context.");
@@ -1204,7 +1417,7 @@ function VoiceTest({ config, flow }) {
               version: "1.4.0",
               about: {
                 library: "pipecat-assist-ui",
-                library_version: "0.1.4",
+                library_version: "0.1.5",
                 platform: "browser",
               },
             },
@@ -1235,7 +1448,12 @@ function VoiceTest({ config, flow }) {
           setDetail("Connected. Speak to the selected assistant.");
         }
         if (["failed", "disconnected", "closed"].includes(next) && !closingRef.current) {
-          clearSession(next === "failed" ? "error" : "idle", `WebRTC ${next}`);
+          clearSession(
+            next === "failed" ? "error" : "idle",
+            next === "failed"
+              ? "WebRTC failed after the offer was accepted. Check the add-on logs for provider or model errors."
+              : `WebRTC ${next}`,
+          );
         }
       };
 
@@ -1259,7 +1477,7 @@ function VoiceTest({ config, flow }) {
       });
 
       if (!response.ok) {
-        throw new Error(await response.text());
+        throw new Error(await offerErrorMessage(response));
       }
 
       const answer = await response.json();
@@ -1269,18 +1487,20 @@ function VoiceTest({ config, flow }) {
       });
       setDetail("Connecting audio");
     } catch (err) {
-      clearSession("error", err?.message || String(err));
+      clearSession("error", friendlyWebRtcError(err));
     }
   }
 
   const running = ["requesting", "connecting", "connected"].includes(state);
-  const stateLabel = {
+  const stateLabel = state === "idle" && !readiness.ok ? "Setup needed" : {
     connected: "Connected",
     connecting: "Connecting",
     error: "Needs attention",
     idle: "Idle",
     requesting: "Microphone",
   }[state];
+  const displayDetail = state === "idle" ? readiness.detail : detail;
+  const startDisabled = state === "idle" && !readiness.ok;
 
   return (
     <div className="voice-test">
@@ -1289,10 +1509,15 @@ function VoiceTest({ config, flow }) {
       </div>
       <div className="voice-copy">
         <strong>{stateLabel}</strong>
-        <span>{detail}</span>
+        <span>{displayDetail}</span>
         <audio ref={audioRef} autoPlay controls />
       </div>
-      <Button icon={running ? X : Mic2} variant={running ? "danger" : "primary"} onClick={running ? () => stopVoiceTest() : startVoiceTest}>
+      <Button
+        icon={running ? X : Mic2}
+        variant={running ? "danger" : "primary"}
+        onClick={running ? () => stopVoiceTest() : startVoiceTest}
+        disabled={startDisabled}
+      >
         {running ? "Stop voice test" : "Start voice test"}
       </Button>
     </div>

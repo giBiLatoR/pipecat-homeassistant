@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.5
+
+- Reworked the integrations editor so each provider shows only contextual
+  settings for that integration type.
+- Added voice-test preflight checks for the selected realtime provider, saved
+  API key state, unsupported providers, and missing MCP token warnings.
+- Improved SmallWebRTC error messages in the browser voice test.
+
 ## 0.1.4
 
 - Made Gemini Live the first-run default pipeline and provider configuration.

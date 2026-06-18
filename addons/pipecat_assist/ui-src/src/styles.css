@@ -241,6 +241,36 @@ h3 {
   padding-top: 18px;
 }
 
+.integration-editor {
+  gap: 16px;
+}
+
+.settings-section {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+}
+
+.section-title strong {
+  font-size: 13px;
+}
+
+.section-title span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
 .template-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
