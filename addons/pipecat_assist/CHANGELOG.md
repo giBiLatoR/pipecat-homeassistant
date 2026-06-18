@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.3
+
+- Added Gemini Live realtime runtime support through Pipecat's Google service.
+- Added Google dependencies to the add-on image.
+- Added Gemini defaults and a dedicated Gemini Live pipeline template in the UI.
+- Added Gemini text bridge support for Home Assistant Conversation through
+  Google's OpenAI-compatible endpoint.
+- Added a Gemini Live setup and test guide for Home Assistant.
+
 ## 0.1.2
 
 - Fixed the React UI asset and API paths for Home Assistant Ingress.

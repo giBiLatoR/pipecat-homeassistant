@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from openai import AsyncOpenAI
 
-from app.config import RuntimeConfig
+from app.config import DEFAULT_GEMINI_TEXT_MODEL, RuntimeConfig
 from app.mcp_bridge import HomeAssistantMCPBridge
 
 
@@ -43,6 +44,13 @@ def _tool_args(raw: str | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _text_model(config: RuntimeConfig, provider_kind: str, integration, flow) -> str:
+    model = flow.text_model or (integration.default_model if integration else "") or config.text_model
+    if provider_kind == "gemini" and (not model or model.startswith(("gpt-", "claude-"))):
+        return (integration.default_model if integration else "") or DEFAULT_GEMINI_TEXT_MODEL
+    return model
+
+
 async def run_text_conversation(
     config: RuntimeConfig,
     *,
@@ -56,7 +64,7 @@ async def run_text_conversation(
     flow = config.selected_flow(flow_id)
     integration = config.model_integration(flow)
     provider_kind = integration.kind if integration else "openai"
-    if provider_kind not in {"openai", "openai_compatible", "ollama"}:
+    if provider_kind not in {"openai", "gemini", "openai_compatible", "ollama"}:
         return {
             "speech": "This Pipecat Assist text bridge does not support the selected model provider yet.",
             "conversation_id": conversation_id,
@@ -64,7 +72,10 @@ async def run_text_conversation(
             "error": "unsupported_text_provider",
         }
 
-    api_key = (integration.api_key if integration else "") or config.openai_api_key
+    if provider_kind == "gemini":
+        api_key = (integration.api_key if integration else "") or os.getenv("GOOGLE_API_KEY", "")
+    else:
+        api_key = (integration.api_key if integration else "") or config.openai_api_key
     if provider_kind == "ollama" and not api_key:
         api_key = "ollama"
     if not api_key:
@@ -92,6 +103,12 @@ async def run_text_conversation(
     client_kwargs: dict[str, Any] = {"api_key": api_key}
     if integration and integration.base_url and provider_kind in {"openai_compatible", "ollama"}:
         client_kwargs["base_url"] = integration.base_url
+    if provider_kind == "gemini":
+        client_kwargs["base_url"] = (
+            integration.base_url
+            if integration and integration.base_url
+            else "https://generativelanguage.googleapis.com/v1beta/openai/"
+        )
     client = AsyncOpenAI(**client_kwargs)
     tools: list[dict[str, Any]] = []
 
@@ -119,9 +136,7 @@ async def run_text_conversation(
     try:
         for _ in range(6):
             kwargs: dict[str, Any] = {
-                "model": flow.text_model
-                or (integration.default_model if integration else "")
-                or config.text_model,
+                "model": _text_model(config, provider_kind, integration, flow),
                 "messages": messages,
             }
             if tools:

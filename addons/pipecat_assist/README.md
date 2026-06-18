@@ -11,5 +11,8 @@ Ingress, and exposes a SmallWebRTC endpoint for Pipecat ESP32 satellites.
 Open the web UI after starting the add-on to manage pipelines, cloud/local AI
 integrations, MCP settings, and the satellite URL.
 
+For Google Gemini Live setup and testing through Home Assistant Assist, see
+`docs/gemini-live-home-assistant.md` in the repository.
+
 Home Assistant displays this add-on with `icon.png` and `logo.png` from this
 directory. The Ingress UI uses the same Pipecat mark in `/assets/logo.svg`.

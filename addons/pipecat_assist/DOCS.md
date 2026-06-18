@@ -32,6 +32,11 @@ Home Assistant MCP.
 : Configure Home Assistant MCP access, the satellite public host, and the
 shared satellite secret.
 
+## Gemini Live
+
+For a Gemini Live setup and Home Assistant Assist test path, see
+`docs/gemini-live-home-assistant.md` in the repository.
+
 ## Pipecat ESP32
 
 Build the ESP32 firmware with:

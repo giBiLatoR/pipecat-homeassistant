@@ -21,6 +21,9 @@ DEFAULT_INSTRUCTIONS = (
     "device, or action is ambiguous, ask one short clarification."
 )
 
+DEFAULT_GEMINI_TEXT_MODEL = "gemini-3.5-flash"
+DEFAULT_GEMINI_LIVE_MODEL = "models/gemini-3.1-flash-live-preview"
+DEFAULT_GEMINI_LIVE_VOICE = "Charon"
 SECRET_FIELDS = ("api_key", "token", "secret_key", "access_key_id")
 
 
@@ -127,8 +130,11 @@ def default_integrations() -> list[IntegrationConfig]:
             id="gemini",
             name="Google Gemini",
             kind="gemini",
-            enabled=False,
-            default_realtime_model="gemini-2.5-flash-live",
+            enabled=bool(os.getenv("GOOGLE_API_KEY")),
+            api_key=os.getenv("GOOGLE_API_KEY", ""),
+            default_model=os.getenv("GEMINI_TEXT_MODEL", DEFAULT_GEMINI_TEXT_MODEL),
+            default_realtime_model=os.getenv("GEMINI_LIVE_MODEL", DEFAULT_GEMINI_LIVE_MODEL),
+            default_voice=os.getenv("GEMINI_LIVE_VOICE", DEFAULT_GEMINI_LIVE_VOICE),
         ),
         IntegrationConfig(
             id="anthropic",
@@ -217,9 +223,13 @@ class FlowConfig(BaseModel):
     name: str = "Home Assistant realtime"
     enabled: bool = True
     mode: Literal["realtime", "classic", "text"] = "realtime"
-    pipeline_template: Literal["realtime_home", "cloud_cascade", "local_first", "custom"] = (
-        "realtime_home"
-    )
+    pipeline_template: Literal[
+        "realtime_home",
+        "gemini_live_home",
+        "cloud_cascade",
+        "local_first",
+        "custom",
+    ] = "realtime_home"
     provider_id: str = "openai"
     model: str = "gpt-realtime-2"
     text_model: str = "gpt-5.4-mini"
@@ -426,6 +436,26 @@ class ConfigStore:
             openai.api_key = config.openai_api_key
             openai.enabled = True
             changed = True
+
+        gemini = config.integration("gemini")
+        if gemini:
+            google_api_key = os.getenv("GOOGLE_API_KEY", "")
+            if google_api_key and not gemini.api_key:
+                gemini.api_key = google_api_key
+                gemini.enabled = True
+                changed = True
+            if not gemini.default_model:
+                gemini.default_model = os.getenv("GEMINI_TEXT_MODEL", DEFAULT_GEMINI_TEXT_MODEL)
+                changed = True
+            if gemini.default_realtime_model in {"", "gemini-2.5-flash-live"}:
+                gemini.default_realtime_model = os.getenv(
+                    "GEMINI_LIVE_MODEL",
+                    DEFAULT_GEMINI_LIVE_MODEL,
+                )
+                changed = True
+            if not gemini.default_voice:
+                gemini.default_voice = os.getenv("GEMINI_LIVE_VOICE", DEFAULT_GEMINI_LIVE_VOICE)
+                changed = True
 
         mcp = config.mcp_integration
         if config.ha_mcp_url and mcp and not mcp.base_url:

@@ -38,7 +38,14 @@ from pipecat.services.openai.realtime.llm import OpenAIRealtimeLLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.workers.runner import WorkerRunner
 
-from app.config import ConfigStore, FlowConfig, RuntimeConfig
+from app.config import (
+    DEFAULT_GEMINI_LIVE_MODEL,
+    DEFAULT_GEMINI_LIVE_VOICE,
+    ConfigStore,
+    FlowConfig,
+    IntegrationConfig,
+    RuntimeConfig,
+)
 from app.mcp_bridge import HomeAssistantMCPBridge, check_mcp
 from app.text_agent import run_text_conversation
 
@@ -170,7 +177,7 @@ def _noise_reduction(flow: FlowConfig):
     return InputAudioNoiseReduction(type=flow.noise_reduction)
 
 
-def _session_properties(flow: FlowConfig, tools_schema) -> SessionProperties:
+def _session_properties(flow: FlowConfig, tools_schema, voice: str | None = None) -> SessionProperties:
     tools = tools_schema if tools_schema and tools_schema.standard_tools else None
     return SessionProperties(
         audio=AudioConfiguration(
@@ -182,7 +189,7 @@ def _session_properties(flow: FlowConfig, tools_schema) -> SessionProperties:
                 turn_detection=_turn_detection(flow),
                 noise_reduction=_noise_reduction(flow),
             ),
-            output=AudioOutput(voice=flow.voice, speed=flow.speed),
+            output=AudioOutput(voice=voice or flow.voice, speed=flow.speed),
         ),
         output_modalities=["audio"],
         tools=tools,
@@ -202,6 +209,128 @@ def _transport_params(flow: FlowConfig) -> dict[str, Any]:
     }
 
 
+def _output_step(flow: FlowConfig):
+    return next(
+        (step for step in flow.steps if step.kind in {"output", "tts"} and step.enabled),
+        None,
+    )
+
+
+def _model_name(flow: FlowConfig, integration: IntegrationConfig | None) -> str:
+    model_step = flow.model_step()
+    model = (
+        (model_step.model if model_step else "")
+        or flow.model
+        or (integration.default_realtime_model if integration else "")
+    )
+    if integration and integration.kind == "gemini" and (not model or model.startswith("gpt-")):
+        return integration.default_realtime_model or DEFAULT_GEMINI_LIVE_MODEL
+    return model
+
+
+def _openai_voice(flow: FlowConfig, integration: IntegrationConfig | None) -> str:
+    output_step = _output_step(flow)
+    return (
+        (output_step.voice if output_step else "")
+        or flow.voice
+        or (integration.default_voice if integration else "")
+        or "marin"
+    )
+
+
+def _gemini_model(model: str) -> str:
+    model = model.strip() or DEFAULT_GEMINI_LIVE_MODEL
+    return model if model.startswith("models/") else f"models/{model}"
+
+
+def _gemini_voice(flow: FlowConfig, integration: IntegrationConfig | None) -> str:
+    output_step = _output_step(flow)
+    openai_voice_names = {
+        "alloy",
+        "ash",
+        "ballad",
+        "cedar",
+        "coral",
+        "echo",
+        "fable",
+        "marin",
+        "nova",
+        "onyx",
+        "sage",
+        "shimmer",
+        "verse",
+    }
+    for candidate in ((output_step.voice if output_step else ""), flow.voice):
+        if candidate and candidate not in openai_voice_names:
+            return candidate
+    return (integration.default_voice if integration else "") or DEFAULT_GEMINI_LIVE_VOICE
+
+
+def _gemini_vad(flow: FlowConfig):
+    try:
+        from pipecat.services.google.gemini_live.llm import GeminiVADParams
+    except ImportError:
+        from pipecat.services.google.gemini_live import GeminiVADParams
+
+    silence_by_eagerness = {
+        "high": 300,
+        "medium": 500,
+        "low": 800,
+    }
+    silence_duration_ms = silence_by_eagerness.get(flow.vad_eagerness)
+    return GeminiVADParams(silence_duration_ms=silence_duration_ms)
+
+
+def _gemini_live_service(
+    *,
+    api_key: str,
+    model: str,
+    flow: FlowConfig,
+    integration: IntegrationConfig | None,
+):
+    try:
+        from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
+    except ImportError:
+        from pipecat.services.google.gemini_live import GeminiLiveLLMService
+
+    settings_kwargs: dict[str, Any] = {
+        "model": _gemini_model(model),
+        "system_instruction": flow.instructions,
+        "voice": _gemini_voice(flow, integration),
+        "language": flow.language or "en-US",
+        "vad": _gemini_vad(flow),
+    }
+    if flow.max_output_tokens:
+        settings_kwargs["max_tokens"] = flow.max_output_tokens
+
+    return GeminiLiveLLMService(
+        api_key=api_key,
+        settings=GeminiLiveLLMService.Settings(**settings_kwargs),
+    )
+
+
+def _openai_realtime_service(
+    *,
+    api_key: str,
+    model: str,
+    flow: FlowConfig,
+    integration: IntegrationConfig | None,
+    tools_schema,
+):
+    return OpenAIRealtimeLLMService(
+        api_key=api_key,
+        settings=OpenAIRealtimeLLMService.Settings(
+            model=model,
+            system_instruction=flow.instructions,
+            session_properties=_session_properties(
+                flow,
+                tools_schema,
+                voice=_openai_voice(flow, integration),
+            ),
+        ),
+    )
+
+
 async def run_bot(
     transport: BaseTransport,
     runner_args: RunnerArguments,
@@ -212,21 +341,19 @@ async def run_bot(
 
     integration = config.model_integration(flow)
     provider_kind = integration.kind if integration else "openai"
-    if provider_kind != "openai":
+    if provider_kind not in {"openai", "gemini"}:
         raise RuntimeError(
             f"Realtime voice runtime for {provider_kind} is not enabled in this build yet"
         )
 
-    api_key = (integration.api_key if integration else "") or config.openai_api_key
+    if provider_kind == "gemini":
+        api_key = (integration.api_key if integration else "") or os.getenv("GOOGLE_API_KEY", "")
+    else:
+        api_key = (integration.api_key if integration else "") or config.openai_api_key
     if not api_key:
-        raise RuntimeError("The selected realtime provider is missing an API key")
+        raise RuntimeError(f"The selected {provider_kind} realtime provider is missing an API key")
 
-    model_step = flow.model_step()
-    realtime_model = (
-        (model_step.model if model_step else "")
-        or flow.model
-        or (integration.default_realtime_model if integration else "")
-    )
+    realtime_model = _model_name(flow, integration)
 
     bridge: HomeAssistantMCPBridge | None = None
     tools_schema = None
@@ -246,14 +373,21 @@ async def run_bot(
             await bridge.close()
             bridge = None
 
-    llm = OpenAIRealtimeLLMService(
-        api_key=api_key,
-        settings=OpenAIRealtimeLLMService.Settings(
+    if provider_kind == "gemini":
+        llm = _gemini_live_service(
+            api_key=api_key,
             model=realtime_model,
-            system_instruction=flow.instructions,
-            session_properties=_session_properties(flow, tools_schema),
-        ),
-    )
+            flow=flow,
+            integration=integration,
+        )
+    else:
+        llm = _openai_realtime_service(
+            api_key=api_key,
+            model=realtime_model,
+            flow=flow,
+            integration=integration,
+            tools_schema=tools_schema,
+        )
     if bridge and tools_schema:
         await bridge.register_tools_schema(tools_schema, llm)
 

@@ -33,6 +33,9 @@ const API = {
 };
 
 const REDACTED = "__redacted__";
+const GEMINI_TEXT_MODEL = "gemini-3.5-flash";
+const GEMINI_LIVE_MODEL = "models/gemini-3.1-flash-live-preview";
+const GEMINI_LIVE_VOICE = "Charon";
 
 const providerKinds = [
   ["openai", "OpenAI", Cloud],
@@ -70,6 +73,21 @@ const templates = [
       ["llm", "llm", "Realtime model", "openai"],
       ["tools", "tools", "HA MCP tools", "ha-mcp"],
       ["output", "output", "Audio output", "openai"],
+    ],
+  },
+  {
+    id: "gemini_live_home",
+    label: "Gemini Live",
+    icon: Cloud,
+    mode: "realtime",
+    provider: "gemini",
+    accent: "blue",
+    steps: [
+      ["transport", "transport", "SmallWebRTC", ""],
+      ["vad", "vad", "Gemini VAD", ""],
+      ["llm", "llm", "Live model", "gemini"],
+      ["tools", "tools", "HA MCP tools", "ha-mcp"],
+      ["output", "output", "Native audio", "gemini"],
     ],
   },
   {
@@ -169,6 +187,17 @@ function makeStep(kind, label, integrationId = "", suffix = "") {
   };
 }
 
+function providerDefaults(provider) {
+  if (provider === "gemini") {
+    return {
+      model: GEMINI_LIVE_MODEL,
+      text_model: GEMINI_TEXT_MODEL,
+      voice: GEMINI_LIVE_VOICE,
+    };
+  }
+  return {};
+}
+
 function stepsFromTemplate(template) {
   return template.steps.map(([id, kind, label, integrationId]) => ({
     ...makeStep(kind, label, integrationId, id),
@@ -178,6 +207,7 @@ function stepsFromTemplate(template) {
 
 function applyTemplate(flow, templateId) {
   const template = templates.find((item) => item.id === templateId) || templates[0];
+  const defaults = providerDefaults(template.provider);
   const steps = template.id === "custom" && flow.steps?.length ? flow.steps : stepsFromTemplate(template);
   const llm = steps.find((step) => step.kind === "llm");
   const output = steps.find((step) => step.kind === "output" || step.kind === "tts");
@@ -186,8 +216,9 @@ function applyTemplate(flow, templateId) {
     mode: template.mode,
     pipeline_template: template.id,
     provider_id: llm?.integration_id || template.provider,
-    model: llm?.model || flow.model || "",
-    voice: output?.voice || flow.voice || "",
+    model: llm?.model || defaults.model || flow.model || "",
+    text_model: defaults.text_model || flow.text_model || "",
+    voice: output?.voice || defaults.voice || flow.voice || "",
     steps,
   };
 }
@@ -431,9 +462,9 @@ function App() {
       endpoint: "",
       region: "",
       deployment: "",
-      default_model: "",
-      default_realtime_model: "",
-      default_voice: "",
+      default_model: kind === "gemini" ? GEMINI_TEXT_MODEL : "",
+      default_realtime_model: kind === "gemini" ? GEMINI_LIVE_MODEL : "",
+      default_voice: kind === "gemini" ? GEMINI_LIVE_VOICE : "",
       organization: "",
       project: "",
       access_key_id: "",
