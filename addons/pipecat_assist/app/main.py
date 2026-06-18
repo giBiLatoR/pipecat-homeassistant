@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hmac
 import os
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -128,6 +130,7 @@ async def api_status(request: Request):
         "flow_count": len(config.flows),
         "mcp_url": config.effective_mcp_url,
         "mcp_token_configured": bool(config.effective_mcp_token),
+        "mcp_token_source": config.effective_mcp_token_source,
     }
 
 
@@ -377,9 +380,15 @@ async def run_bot(
             tools_schema = await bridge.tools_schema()
             if not tools_schema.standard_tools:
                 tools_schema = None
+        except asyncio.CancelledError as err:
+            logger.warning("Starting without MCP tools after MCP startup was cancelled: {}", err)
+            with suppress(Exception):
+                await bridge.close()
+            bridge = None
         except Exception as err:
             logger.warning("Starting without MCP tools: {}", err)
-            await bridge.close()
+            with suppress(Exception):
+                await bridge.close()
             bridge = None
 
     if provider_kind == "gemini":

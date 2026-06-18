@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.6
+
+- Prevented Home Assistant MCP authentication failures from crashing realtime
+  voice sessions.
+- Added MCP HTTP preflight so 401/403 errors become actionable configuration
+  messages instead of AnyIO/ASGI cancellation traces.
+- Made the Runtime panel distinguish Supervisor-token fallback from a saved
+  long-lived MCP token.
+
 ## 0.1.5
 
 - Reworked the integrations editor so each provider shows only contextual

@@ -357,6 +357,19 @@ class RuntimeConfig(BaseModel):
             or os.getenv("SUPERVISOR_TOKEN", "")
         )
 
+    @property
+    def effective_mcp_token_source(self) -> str:
+        """Return where the effective MCP token came from."""
+
+        integration = self.mcp_integration
+        if integration and integration.token:
+            return "integration"
+        if self.longlived_token or os.getenv("LONGLIVED_TOKEN"):
+            return "long-lived"
+        if os.getenv("SUPERVISOR_TOKEN"):
+            return "supervisor"
+        return ""
+
     def public_dict(self) -> dict[str, Any]:
         """Return configuration safe enough for the UI."""
 
@@ -373,6 +386,7 @@ class RuntimeConfig(BaseModel):
                 integration[key] = REDACTED if configured else ""
 
         data["effective_mcp_url"] = self.effective_mcp_url
+        data["mcp_token_source"] = self.effective_mcp_token_source
         return data
 
 

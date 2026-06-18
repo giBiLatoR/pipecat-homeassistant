@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+from contextlib import suppress
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -123,8 +125,19 @@ async def run_text_conversation(
             await bridge.start()
             tools_schema = await bridge.tools_schema()
             tools = _format_openai_tools(tools_schema)
+        except asyncio.CancelledError as err:
+            with suppress(Exception):
+                await bridge.close()
+            bridge = None
+            return {
+                "speech": f"Home Assistant MCP is not available: {err}",
+                "conversation_id": conversation_id,
+                "continue_conversation": False,
+                "error": "mcp_unavailable",
+            }
         except Exception as err:
-            await bridge.close()
+            with suppress(Exception):
+                await bridge.close()
             bridge = None
             return {
                 "speech": f"Home Assistant MCP is not available: {err}",

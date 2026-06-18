@@ -1279,6 +1279,12 @@ function voiceReadiness(config, flow) {
   }
 
   const mcp = config.integrations.find((item) => item.kind === "home_assistant_mcp");
+  if (flow.mcp_enabled && config.mcp_token_source === "supervisor" && secretStatus(mcp, "token") === "missing") {
+    return {
+      ok: true,
+      detail: "Ready. MCP will use the Supervisor token; if Check MCP returns 401, paste a long-lived token.",
+    };
+  }
   if (flow.mcp_enabled && secretStatus(mcp, "token") === "missing" && !config.longlived_token_configured) {
     return {
       ok: true,
@@ -1311,6 +1317,13 @@ function friendlyWebRtcError(err) {
     return "Could not reach the SmallWebRTC offer endpoint. Check that the add-on is running in Home Assistant Ingress.";
   }
   return message;
+}
+
+function mcpStatusLabel(config, status) {
+  const source = status?.mcp_token_source || config.mcp_token_source || "";
+  if (source === "integration" || source === "long-lived") return "token ready";
+  if (source === "supervisor") return "supervisor token";
+  return "token pending";
 }
 
 function VoiceTest({ config, flow }) {
@@ -1417,7 +1430,7 @@ function VoiceTest({ config, flow }) {
               version: "1.4.0",
               about: {
                 library: "pipecat-assist-ui",
-                library_version: "0.1.5",
+                library_version: "0.1.6",
                 platform: "browser",
               },
             },
@@ -1532,7 +1545,7 @@ function RuntimeView({ config, flow, status, checkMcp, copyOfferUrl, updateConfi
         <div className="panel-head">
           <div>
             <h3>Home Assistant</h3>
-            <span>{status?.mcp_token_configured ? "token ready" : "token pending"}</span>
+            <span>{mcpStatusLabel(config, status)}</span>
           </div>
           <Button icon={RefreshCw} variant="secondary" onClick={checkMcp}>
             Check MCP

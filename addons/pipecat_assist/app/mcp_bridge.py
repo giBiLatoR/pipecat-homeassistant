@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from typing import Any
 
+import httpx
 from loguru import logger
 from mcp.client.session_group import StreamableHttpParameters
 
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.services.llm_service import LLMService
 from pipecat.services.mcp_service import MCPClient
+
+
+class MCPAuthenticationError(RuntimeError):
+    """Raised when Home Assistant rejects the MCP bearer token."""
 
 
 class HomeAssistantMCPBridge:
@@ -36,6 +42,7 @@ class HomeAssistantMCPBridge:
             raise RuntimeError("Home Assistant MCP token is not configured")
         if self.client:
             return
+        await self._preflight_auth()
         self.client = MCPClient(
             server_params=StreamableHttpParameters(
                 url=self.url,
@@ -46,12 +53,48 @@ class HomeAssistantMCPBridge:
         await self.client.start()
         logger.info("Connected to Home Assistant MCP at {}", self.url)
 
+    async def _preflight_auth(self) -> None:
+        """Detect auth failures before MCPClient starts background tasks."""
+
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        }
+        payload = {"jsonrpc": "2.0", "id": "pipecat-assist-preflight", "method": "ping"}
+
+        try:
+            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+                response = await client.post(self.url, headers=headers, json=payload)
+        except httpx.HTTPError as err:
+            raise RuntimeError(f"Home Assistant MCP is not reachable: {err}") from err
+
+        if response.status_code in {401, 403}:
+            raise MCPAuthenticationError(
+                "Home Assistant MCP rejected the token. Paste a Home Assistant "
+                "long-lived access token in Integrations > Home Assistant MCP > "
+                "Access token, save, and retry."
+            )
+        if response.status_code == 404:
+            raise RuntimeError(f"Home Assistant MCP endpoint was not found at {self.url}")
+        if response.status_code >= 500:
+            raise RuntimeError(
+                f"Home Assistant MCP returned HTTP {response.status_code}. Check the Home Assistant logs."
+            )
+
     async def close(self) -> None:
         """Close the MCP connection."""
 
-        if self.client:
-            await self.client.close()
-            self.client = None
+        client = self.client
+        self.client = None
+        if not client:
+            return
+        try:
+            await client.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            logger.debug("Ignoring MCP close error: {}", err)
 
     async def tools_schema(self) -> ToolsSchema:
         """Return MCP tools in Pipecat schema format."""
@@ -93,7 +136,9 @@ async def check_mcp(url: str, token: str, tool_allowlist: Sequence[str] | None =
                 "tool_count": len(tools.standard_tools),
                 "tools": [tool.name for tool in tools.standard_tools[:50]],
             }
+    except asyncio.CancelledError as err:
+        logger.warning("MCP check was cancelled: {}", err)
+        return {"ok": False, "error": "MCP check was cancelled", "tool_count": 0, "tools": []}
     except Exception as err:
         logger.warning("MCP check failed: {}", err)
         return {"ok": False, "error": str(err), "tool_count": 0, "tools": []}
-
