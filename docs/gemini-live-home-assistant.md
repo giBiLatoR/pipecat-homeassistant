@@ -14,7 +14,7 @@ There are two useful test paths:
 
 ## Requirements
 
-- Pipecat Assist 0.1.11 or newer.
+- Pipecat Assist 0.1.13 or newer.
 - Home Assistant with the Model Context Protocol Server integration enabled.
 - A Google AI Studio API key with access to the Gemini Live API.
 - The `custom_components/pipecat_assist` integration installed if you want to
@@ -26,7 +26,7 @@ the add-on image includes `pipecat-ai[google]`.
 
 ## Configure The Add-On
 
-1. Update Pipecat Assist to version 0.1.12 or newer.
+1. Update Pipecat Assist to version 0.1.13 or newer.
 2. Start the add-on and open the Pipecat Assist web UI.
 3. In Home Assistant, enable **Model Context Protocol Server**.
 4. Open **Runtime > Home Assistant**:
@@ -35,8 +35,8 @@ the add-on image includes `pipecat-ai[google]`.
    - Click **Check MCP**. A healthy result shows the number of tools. In a
      normal add-on install this uses the Home Assistant Supervisor token
      automatically.
-   - Use `Connect OAuth` or `Access token` only as a fallback if the Supervisor
-     token is not available in your installation.
+   - Click **Reset MCP** if you previously saved a custom MCP URL or token and
+     want to return to the Supervisor-backed defaults.
 5. Open **Integrations > Google Gemini**:
    - `API key`: paste the key from Google AI Studio.
    - `Default model`: use `gemini-3.5-flash` for Home Assistant Assist text
@@ -121,9 +121,10 @@ with voice.
 - `Missing module: google.genai`: the add-on image is older than 0.1.3.
 - `model not found`: check Live API access in Google AI Studio. You can also
   test `models/gemini-2.5-flash-native-audio-preview-12-2025`.
-- MCP or `401`: first restart the add-on and select **Check MCP** again so it
-  can use the Supervisor token. Use OAuth or a Home Assistant long-lived access
-  token only for custom MCP URLs or non-Supervisor deployments.
+- MCP or `401`: select **Reset MCP**, restart the add-on, and then select
+  **Check MCP** again so it can use the Supervisor token. Use a Home Assistant
+  long-lived access token only for custom MCP URLs or non-Supervisor
+  deployments.
 - HA Assist does not respond: make sure the custom integration points to
   `http://127.0.0.1:7860` or to the correct Home Assistant LAN URL.
 - The browser voice test has no microphone: use HTTPS or a browser trusted

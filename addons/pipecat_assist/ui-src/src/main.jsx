@@ -9,11 +9,11 @@ import {
   Cpu,
   GitBranch,
   Home,
-  KeyRound,
   Mic2,
   Plus,
   Radio,
   RefreshCw,
+  RotateCcw,
   Save,
   Server,
   Settings,
@@ -46,9 +46,7 @@ const API = {
   config: appUrl("api/assist/config"),
   status: appUrl("api/assist/status"),
   mcp: appUrl("api/assist/mcp/check"),
-  oauthStart: appUrl("api/assist/oauth/start"),
-  oauthComplete: appUrl("api/assist/oauth/complete"),
-  oauthDisconnect: appUrl("api/assist/oauth/disconnect"),
+  mcpReset: appUrl("api/assist/mcp/reset"),
 };
 
 const REDACTED = "__redacted__";
@@ -296,87 +294,10 @@ function secretPlaceholder(item, key, fallback = "") {
   return secretStatus(item, key) === "configured" ? "configured" : fallback;
 }
 
-function visibleHrefCandidates() {
-  const candidates = [];
-  for (const frame of [window.top, window.parent, window]) {
-    try {
-      if (frame?.location?.href && frame.location.origin === window.location.origin) {
-        candidates.push(frame.location.href);
-      }
-    } catch {
-      // Cross-origin frames cannot be inspected; the current frame remains valid.
-    }
-  }
-  return candidates.length ? candidates : [window.location.href];
-}
-
-function currentVisibleUrl() {
-  const candidates = visibleHrefCandidates();
-  const href = candidates.find((item) => new URL(item).pathname.startsWith("/app/")) || window.location.href;
-  const url = new URL(href);
-  url.hash = "";
-  url.search = "";
-  if (!url.pathname.endsWith("/")) {
-    url.pathname = `${url.pathname}/`;
-  }
-  return url.href;
-}
-
-function oauthApiBaseUrl() {
-  return appUrl("api/assist/");
-}
-
-function oauthCallbackPayloadFromUrl() {
-  for (const href of visibleHrefCandidates()) {
-    const url = new URL(href);
-    const code = url.searchParams.get("code") || "";
-    const state = url.searchParams.get("state") || "";
-    const error = url.searchParams.get("error") || "";
-    if (error || (code && state)) {
-      return { code, state, error };
-    }
-  }
-  return null;
-}
-
-function clearOAuthCallbackParams() {
-  for (const frame of [window.top, window.parent, window]) {
-    try {
-      if (!frame?.location?.href || frame.location.origin !== window.location.origin) continue;
-      const url = new URL(frame.location.href);
-      let changed = false;
-      for (const key of ["code", "state", "error", "error_description", "storeToken"]) {
-        if (url.searchParams.has(key)) {
-          url.searchParams.delete(key);
-          changed = true;
-        }
-      }
-      if (changed) {
-        frame.history.replaceState(frame.history.state, "", `${url.pathname}${url.search}${url.hash}`);
-      }
-    } catch {
-      // Ignore frames that cannot be inspected or updated.
-    }
-  }
-}
-
-function navigateVisibleWindow(url) {
-  try {
-    if (window.top?.location?.origin === window.location.origin) {
-      window.top.location.assign(url);
-      return;
-    }
-  } catch {
-    // Fall back to the current frame below.
-  }
-  window.location.assign(url);
-}
-
 function integrationSummary(integration) {
   if (!integration.enabled) return "disabled";
   if (integration.kind === "home_assistant_mcp") {
-    if (secretStatus(integration, "oauth_refresh_token") === "configured") return "OAuth connected";
-    return secretStatus(integration, "token") === "configured" ? "token saved" : "token missing";
+    return secretStatus(integration, "token") === "configured" ? "token saved" : "Supervisor default";
   }
   if (["gemini", "openai", "anthropic", "azure_openai"].includes(integration.kind)) {
     const status = secretStatus(integration, "api_key");
@@ -433,22 +354,10 @@ function App() {
   const [message, setMessage] = useState({ text: "", tone: "" });
   const [fatalError, setFatalError] = useState("");
   const [saving, setSaving] = useState(false);
-  const oauthCompletionStarted = useRef(false);
 
   useEffect(() => {
     load().catch((err) => setFatalError(String(err)));
   }, []);
-
-  useEffect(() => {
-    if (!config || oauthCompletionStarted.current) return;
-    const payload = oauthCallbackPayloadFromUrl();
-    if (!payload) return;
-    oauthCompletionStarted.current = true;
-    completeMcpOAuth(payload).catch((err) => {
-      clearOAuthCallbackParams();
-      setMessage({ text: String(err), tone: "error" });
-    });
-  }, [config]);
 
   const selectedFlow = useMemo(() => {
     if (!config) return null;
@@ -486,6 +395,13 @@ function App() {
     setStatus(await statusResponse.json());
     const flow = nextConfig.flows.find((item) => item.id === nextConfig.selected_flow_id) || nextConfig.flows[0];
     setSelectedStepId(flow.steps.find((step) => step.kind === "llm")?.id || flow.steps[0]?.id || "");
+  }
+
+  async function refreshStatus() {
+    const response = await fetch(API.status);
+    if (response.ok) {
+      setStatus(await response.json());
+    }
   }
 
   function updateConfig(updater) {
@@ -609,11 +525,6 @@ function App() {
       project: "",
       access_key_id: "",
       secret_key: "",
-      oauth_access_token: "",
-      oauth_refresh_token: "",
-      oauth_expires_at: 0,
-      oauth_client_id: "",
-      oauth_token_url: "",
     };
     updateConfig((draft) => {
       draft.integrations.push(integration);
@@ -674,50 +585,16 @@ function App() {
     );
   }
 
-  async function completeMcpOAuth(payload) {
-    setMessage({ text: "Completing Home Assistant OAuth", tone: "" });
-    const response = await fetch(API.oauthComplete, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    clearOAuthCallbackParams();
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(text || "Home Assistant OAuth completion failed");
-    }
-    setConfig(ensureShape(await response.json()));
-    setMessage({ text: "Home Assistant OAuth connected", tone: "ok" });
-  }
-
-  async function startMcpOAuth() {
-    const authorizeUrl = new URL("/auth/authorize", window.location.origin).href;
-    const response = await fetch(API.oauthStart, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ha_url: window.location.origin,
-        authorize_url: authorizeUrl,
-        api_base_url: oauthApiBaseUrl(),
-        return_url: currentVisibleUrl(),
-      }),
-    });
-    if (!response.ok) {
-      setMessage({ text: await response.text(), tone: "error" });
-      return;
-    }
-    const result = await response.json();
-    navigateVisibleWindow(result.auth_url);
-  }
-
-  async function disconnectMcpOAuth() {
-    const response = await fetch(API.oauthDisconnect, { method: "POST" });
+  async function resetMcpDefaults() {
+    setMessage({ text: "Resetting MCP", tone: "" });
+    const response = await fetch(API.mcpReset, { method: "POST" });
     if (!response.ok) {
       setMessage({ text: await response.text(), tone: "error" });
       return;
     }
     setConfig(ensureShape(await response.json()));
-    setMessage({ text: "Home Assistant OAuth disconnected", tone: "ok" });
+    await refreshStatus();
+    setMessage({ text: "MCP reset to Supervisor defaults", tone: "ok" });
   }
 
   async function copyOfferUrl() {
@@ -842,8 +719,7 @@ function App() {
             flow={selectedFlow}
             status={status}
             checkMcp={checkMcp}
-            startMcpOAuth={startMcpOAuth}
-            disconnectMcpOAuth={disconnectMcpOAuth}
+            resetMcpDefaults={resetMcpDefaults}
             copyOfferUrl={copyOfferUrl}
             updateConfig={updateConfig}
             updateIntegration={updateIntegration}
@@ -1440,14 +1316,13 @@ function voiceReadiness(config, flow) {
   }
 
   const mcp = config.integrations.find((item) => item.kind === "home_assistant_mcp");
-  const hasMcpOAuth = config.mcp_token_source === "oauth" || secretStatus(mcp, "oauth_refresh_token") === "configured";
   if (flow.mcp_enabled && config.mcp_token_source === "supervisor" && secretStatus(mcp, "token") === "missing") {
     return {
       ok: true,
       detail: "Ready. MCP will use the Home Assistant Supervisor token.",
     };
   }
-  if (flow.mcp_enabled && !hasMcpOAuth && secretStatus(mcp, "token") === "missing" && !config.longlived_token_configured) {
+  if (flow.mcp_enabled && secretStatus(mcp, "token") === "missing" && !config.longlived_token_configured) {
     return {
       ok: true,
       detail: "Ready. Home Assistant MCP token is missing, so device tools may be unavailable.",
@@ -1483,7 +1358,6 @@ function friendlyWebRtcError(err) {
 
 function mcpStatusLabel(config, status) {
   const source = status?.mcp_token_source || config.mcp_token_source || "";
-  if (source === "oauth") return "OAuth connected";
   if (source === "integration" || source === "long-lived") return "token ready";
   if (source === "supervisor") return "supervisor token";
   return "token pending";
@@ -1593,7 +1467,7 @@ function VoiceTest({ config, flow }) {
               version: "1.4.0",
               about: {
                 library: "pipecat-assist-ui",
-                library_version: "0.1.11",
+                library_version: "0.1.13",
                 platform: "browser",
               },
             },
@@ -1705,21 +1579,17 @@ function RuntimeView({
   flow,
   status,
   checkMcp,
-  startMcpOAuth,
-  disconnectMcpOAuth,
+  resetMcpDefaults,
   copyOfferUrl,
   updateConfig,
   updateIntegration,
 }) {
   const mcp = config.integrations.find((integration) => integration.kind === "home_assistant_mcp");
-  const hasMcpOAuth = config.mcp_token_source === "oauth" || secretStatus(mcp, "oauth_refresh_token") === "configured";
-  const tokenPlaceholder = hasMcpOAuth
-    ? "OAuth connected"
-    : mcp?.token_configured
-      ? "configured"
-      : config.mcp_token_source === "supervisor"
-        ? "Supervisor token"
-        : "optional fallback token";
+  const tokenPlaceholder = mcp?.token_configured
+    ? "configured"
+    : config.mcp_token_source === "supervisor"
+      ? "Supervisor token"
+      : "optional fallback token";
   return (
     <div className="workspace-grid">
       <section className="panel main-panel">
@@ -1729,14 +1599,9 @@ function RuntimeView({
             <span>{mcpStatusLabel(config, status)}</span>
           </div>
           <div className="button-row">
-            <Button icon={KeyRound} variant="secondary" onClick={startMcpOAuth}>
-              Connect OAuth
+            <Button icon={RotateCcw} variant="secondary" onClick={resetMcpDefaults}>
+              Reset MCP
             </Button>
-            {hasMcpOAuth && (
-              <Button icon={X} variant="secondary" onClick={disconnectMcpOAuth}>
-                Disconnect
-              </Button>
-            )}
             <Button icon={RefreshCw} variant="secondary" onClick={checkMcp}>
               Check MCP
             </Button>

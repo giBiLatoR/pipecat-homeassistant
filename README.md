@@ -69,9 +69,10 @@ flowchart LR
 For a complete Google Gemini Live setup and Home Assistant Assist test path,
 see [Gemini Live in Home Assistant](docs/gemini-live-home-assistant.md).
 
-Home Assistant MCP access uses the add-on's Supervisor token by default. OAuth
-and manually pasted long-lived access tokens remain available in the
-**Runtime** UI as fallbacks for custom installations.
+Home Assistant MCP access uses the add-on's Supervisor token by default. Use
+**Runtime > Home Assistant > Reset MCP** to clear custom MCP overrides and
+return to the Supervisor-backed defaults. Manually pasted long-lived access
+tokens are only needed for custom installations outside the Supervisor path.
 
 ## Pipecat ESP32
 

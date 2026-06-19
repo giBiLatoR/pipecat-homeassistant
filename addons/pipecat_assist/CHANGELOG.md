@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.13
+
+- Removed the Home Assistant MCP OAuth flow from the add-on backend and UI.
+- Added a Runtime button that resets Home Assistant MCP settings to the
+  Supervisor-backed defaults.
+- Migrated saved runtime configuration to drop stale OAuth token fields.
+
 ## 0.1.12
 
 - Prefer the Home Assistant Supervisor token for MCP access inside the add-on.

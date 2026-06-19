@@ -29,10 +29,9 @@ Anthropic, Bedrock, Azure/OpenAI-compatible APIs, Ollama, local runtimes, and
 Home Assistant MCP.
 
 `Runtime`
-: Connect Home Assistant MCP through OAuth, configure the satellite public
-host and shared satellite secret, and run a browser voice test that connects to
-the selected pipeline through the same SmallWebRTC offer route used by
-satellites.
+: Check or reset Home Assistant MCP, configure the satellite public host and
+shared satellite secret, and run a browser voice test that connects to the
+selected pipeline through the same SmallWebRTC offer route used by satellites.
 
 ### Home Assistant MCP
 
@@ -40,9 +39,10 @@ In a normal Home Assistant add-on install, Pipecat Assist uses the Supervisor
 token provided by Home Assistant (`homeassistant_api: true`) to reach
 `/api/mcp`. Open **Runtime > Home Assistant** and select **Check MCP**.
 
-OAuth and the manual access-token field are kept only as fallbacks for custom
-deployments where the Supervisor token is not available or a custom MCP URL is
-used.
+Select **Reset MCP** to clear a custom MCP URL or saved access token and return
+to the Supervisor-backed defaults. The manual access-token field is only for
+custom deployments where the Supervisor token is not available or a custom MCP
+URL is used.
 
 ## Gemini Live
 

@@ -24,13 +24,12 @@ DEFAULT_INSTRUCTIONS = (
 DEFAULT_GEMINI_TEXT_MODEL = "gemini-3.5-flash"
 DEFAULT_GEMINI_LIVE_MODEL = "models/gemini-3.1-flash-live-preview"
 DEFAULT_GEMINI_LIVE_VOICE = "Charon"
+DEFAULT_MCP_URL = "http://supervisor/core/api/mcp"
 SECRET_FIELDS = (
     "api_key",
     "token",
     "secret_key",
     "access_key_id",
-    "oauth_access_token",
-    "oauth_refresh_token",
 )
 
 
@@ -94,11 +93,6 @@ class IntegrationConfig(BaseModel):
     project: str = ""
     access_key_id: str = ""
     secret_key: str = ""
-    oauth_access_token: str = ""
-    oauth_refresh_token: str = ""
-    oauth_expires_at: float = 0
-    oauth_client_id: str = ""
-    oauth_token_url: str = ""
 
     @field_validator("id")
     @classmethod
@@ -276,7 +270,7 @@ class FlowConfig(BaseModel):
 class RuntimeConfig(BaseModel):
     """Persisted runtime configuration edited by the web UI."""
 
-    version: int = 3
+    version: int = 4
     openai_api_key: str = ""
     text_model: str = DEFAULT_GEMINI_TEXT_MODEL
     ha_mcp_url: str = ""
@@ -354,25 +348,12 @@ class RuntimeConfig(BaseModel):
             (integration.base_url if integration else "")
             or self.ha_mcp_url
             or os.getenv("HA_MCP_URL")
-            or "http://supervisor/core/api/mcp"
+            or DEFAULT_MCP_URL
         )
 
     @property
     def effective_mcp_token(self) -> str:
         """Return the Home Assistant token used for MCP."""
-
-        integration = self.mcp_integration
-        return (
-            (integration.token if integration else "")
-            or self.longlived_token
-            or os.getenv("LONGLIVED_TOKEN")
-            or os.getenv("SUPERVISOR_TOKEN", "")
-            or (integration.oauth_access_token if integration else "")
-        )
-
-    @property
-    def fallback_mcp_token(self) -> str:
-        """Return the non-OAuth Home Assistant token used for MCP."""
 
         integration = self.mcp_integration
         return (
@@ -393,8 +374,6 @@ class RuntimeConfig(BaseModel):
             return "long-lived"
         if os.getenv("SUPERVISOR_TOKEN"):
             return "supervisor"
-        if integration and integration.oauth_refresh_token:
-            return "oauth"
         return ""
 
     def public_dict(self) -> dict[str, Any]:
@@ -554,10 +533,13 @@ class ConfigStore:
             changed = True
 
         if config.version < 3:
-            config.version = 3
             if config.flows and _looks_like_legacy_openai_default(config.flows[0]):
                 config.flows[0] = _gemini_flow_from_existing(config.flows[0])
                 config.selected_flow_id = config.flows[0].id
+            changed = True
+
+        if config.version < 4:
+            config.version = 4
             changed = True
 
         if changed:
@@ -573,6 +555,30 @@ class ConfigStore:
             json.dump(config.model_dump(), file, indent=2, sort_keys=True)
             file.write("\n")
         tmp_path.replace(self.path)
+
+    def reset_mcp_defaults(self) -> RuntimeConfig:
+        """Reset Home Assistant MCP settings to the Supervisor-backed defaults."""
+
+        config = self.load()
+        config.ha_mcp_url = ""
+        config.longlived_token = ""
+
+        integration = config.mcp_integration
+        if not integration:
+            integration = IntegrationConfig(
+                id="ha-mcp",
+                name="Home Assistant MCP",
+                kind="home_assistant_mcp",
+                enabled=True,
+            )
+            config.integrations.append(integration)
+
+        integration.enabled = True
+        integration.base_url = ""
+        integration.token = ""
+
+        self.save(config)
+        return config
 
     def update_from_public(self, payload: dict[str, Any]) -> RuntimeConfig:
         """Apply a UI update while preserving redacted secrets."""

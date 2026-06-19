@@ -8,13 +8,12 @@ import hmac
 import os
 import time
 from contextlib import suppress
-from html import escape
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import quote
 
 from fastapi import HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger
 from starlette.staticfiles import StaticFiles
 
@@ -48,13 +47,6 @@ from app.config import (
     FlowConfig,
     IntegrationConfig,
     RuntimeConfig,
-)
-from app.ha_oauth import (
-    build_authorize_url,
-    clear_oauth,
-    exchange_code,
-    oauth_token_url_for_store,
-    resolve_mcp_token,
 )
 from app.mcp_bridge import HomeAssistantMCPBridge, check_mcp
 from app.text_agent import run_text_conversation
@@ -122,58 +114,6 @@ def _offer_path(config: RuntimeConfig) -> str:
     return f"api/offer{suffix}"
 
 
-def _first_header_value(value: str | None) -> str:
-    return (value or "").split(",", 1)[0].strip()
-
-
-def _oauth_api_base_from_request(request: Request) -> str:
-    proto = _first_header_value(request.headers.get("x-forwarded-proto")) or request.url.scheme
-    host = (
-        _first_header_value(request.headers.get("x-forwarded-host"))
-        or request.headers.get("host")
-        or request.url.netloc
-    )
-    ingress_path = (request.headers.get("x-ingress-path") or "").strip()
-    if ingress_path:
-        base_path = f"{ingress_path.rstrip('/')}/api/assist/"
-    else:
-        base_path = "/api/assist/"
-    return f"{proto}://{host}{base_path}"
-
-
-def _validated_oauth_api_base(value: str, request: Request) -> str:
-    candidate = (value or "").strip() or _oauth_api_base_from_request(request)
-    parsed = urlparse(candidate)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise HTTPException(status_code=400, detail="api_base_url must be an absolute http(s) URL")
-    path = parsed.path if parsed.path.endswith("/") else f"{parsed.path}/"
-    if not path.endswith("/api/assist/"):
-        path = urljoin(path, "api/assist/")
-    return parsed._replace(path=path, params="", query="", fragment="").geturl()
-
-
-def _validated_oauth_return_url(value: str, ha_url: str) -> str:
-    candidate = (value or "").strip()
-    if not candidate:
-        return ""
-    parsed = urlparse(candidate)
-    ha = urlparse(ha_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise HTTPException(status_code=400, detail="return_url must be an absolute http(s) URL")
-    if ha.scheme and ha.netloc and (parsed.scheme, parsed.netloc) != (ha.scheme, ha.netloc):
-        raise HTTPException(status_code=400, detail="return_url must use the Home Assistant origin")
-    path = parsed.path if parsed.path.endswith("/") else f"{parsed.path}/"
-    return parsed._replace(path=path, params="", query="", fragment="").geturl()
-
-
-async def _complete_oauth(code: str, state: str, error: str = "") -> None:
-    if error:
-        raise RuntimeError(error)
-    if not code or not state:
-        raise RuntimeError("Missing authorization code or state.")
-    await exchange_code(STORE, code=code, state=state)
-
-
 @app.get("/api/assist/status")
 async def api_status(request: Request):
     config = STORE.load()
@@ -217,92 +157,12 @@ async def api_update_config(payload: dict[str, Any], request: Request):
 async def api_check_mcp(payload: dict[str, Any] | None = None):
     config = STORE.load()
     flow = config.selected_flow((payload or {}).get("flow_id"))
-    try:
-        token = await resolve_mcp_token(STORE)
-    except Exception as err:
-        logger.warning("MCP token resolution failed: {}", err)
-        return {"ok": False, "error": str(err), "tool_count": 0, "tools": []}
-    return await check_mcp(config.effective_mcp_url, token, flow.mcp_tool_allowlist)
+    return await check_mcp(config.effective_mcp_url, config.effective_mcp_token, flow.mcp_tool_allowlist)
 
 
-@app.post("/api/assist/oauth/start")
-async def api_oauth_start(payload: dict[str, Any], request: Request):
-    ha_url = str(payload.get("ha_url") or "").rstrip("/")
-    authorize_url = str(payload.get("authorize_url") or "")
-    if not ha_url or not authorize_url:
-        raise HTTPException(status_code=400, detail="ha_url and authorize_url are required")
-    oauth_api_base = _validated_oauth_api_base(str(payload.get("api_base_url") or ""), request)
-    return_url = _validated_oauth_return_url(str(payload.get("return_url") or ""), ha_url)
-    if return_url:
-        client_id = return_url
-        redirect_uri = return_url
-    else:
-        client_id = urljoin(oauth_api_base, "oauth/client")
-        redirect_uri = urljoin(oauth_api_base, "oauth/callback")
-    token_url = oauth_token_url_for_store(STORE, ha_url, str(payload.get("token_url") or ""))
-    auth_url = build_authorize_url(
-        authorize_url=authorize_url,
-        client_id=client_id,
-        redirect_uri=redirect_uri,
-        token_url=token_url,
-    )
-    return {"auth_url": auth_url, "client_id": client_id, "redirect_uri": redirect_uri}
-
-
-@app.get("/api/assist/oauth/client", include_in_schema=False)
-async def api_oauth_client(request: Request):
-    callback_url = urljoin(_validated_oauth_api_base("", request), "oauth/callback")
-    safe_callback = escape(callback_url, quote=True)
-    return HTMLResponse(
-        "<!doctype html><html><head>"
-        "<meta charset=\"utf-8\">"
-        "<title>Pipecat Assist OAuth Client</title>"
-        f"<link rel=\"redirect_uri\" href=\"{safe_callback}\">"
-        "</head><body>"
-        "<h1>Pipecat Assist OAuth Client</h1>"
-        f"<p>Redirect URI: {safe_callback}</p>"
-        "</body></html>"
-    )
-
-
-@app.get("/api/assist/oauth/callback", include_in_schema=False)
-async def api_oauth_callback(code: str = "", state: str = "", error: str = ""):
-    try:
-        await _complete_oauth(code, state, error)
-    except Exception as err:
-        logger.warning("Home Assistant OAuth callback failed: {}", err)
-        return HTMLResponse(
-            f"<h1>Pipecat Assist OAuth failed</h1><p>{escape(str(err))}</p>",
-            status_code=400,
-        )
-    return HTMLResponse(
-        "<h1>Pipecat Assist is connected</h1>"
-        "<p>Home Assistant OAuth is configured. You can close this tab and return to Pipecat Assist.</p>"
-    )
-
-
-@app.post("/api/assist/oauth/complete")
-async def api_oauth_complete(payload: dict[str, Any], request: Request):
-    try:
-        await _complete_oauth(
-            code=str(payload.get("code") or ""),
-            state=str(payload.get("state") or ""),
-            error=str(payload.get("error") or ""),
-        )
-    except Exception as err:
-        logger.warning("Home Assistant OAuth completion failed: {}", err)
-        raise HTTPException(status_code=400, detail=str(err)) from err
-    config = STORE.load()
-    data = config.public_dict()
-    data["runner_offer_url"] = _offer_url(config, request)
-    data["runner_offer_path"] = _offer_path(config)
-    return data
-
-
-@app.post("/api/assist/oauth/disconnect")
-async def api_oauth_disconnect(request: Request):
-    clear_oauth(STORE)
-    config = STORE.load()
+@app.post("/api/assist/mcp/reset")
+async def api_reset_mcp(request: Request):
+    config = STORE.reset_mcp_defaults()
     data = config.public_dict()
     data["runner_offer_url"] = _offer_url(config, request)
     data["runner_offer_path"] = _offer_path(config)
@@ -315,18 +175,13 @@ async def api_conversation(payload: dict[str, Any]):
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
     config = STORE.load()
-    try:
-        mcp_token = await resolve_mcp_token(STORE)
-    except Exception as err:
-        logger.warning("Starting text conversation without MCP token: {}", err)
-        mcp_token = ""
     return await run_text_conversation(
         config,
         text=text,
         language=payload.get("language"),
         conversation_id=payload.get("conversation_id"),
         flow_id=payload.get("flow_id"),
-        mcp_token=mcp_token,
+        mcp_token=config.effective_mcp_token,
     )
 
 
@@ -617,13 +472,8 @@ async def bot(runner_args: RunnerArguments):
     config = STORE.load()
     body = runner_args.body if isinstance(runner_args.body, dict) else {}
     flow = config.selected_flow(body.get("flow_id"))
-    try:
-        mcp_token = await resolve_mcp_token(STORE)
-    except Exception as err:
-        logger.warning("Starting without MCP token: {}", err)
-        mcp_token = ""
     transport = await create_transport(runner_args, _transport_params(flow))
-    await run_bot(transport, runner_args, config, flow, mcp_token=mcp_token)
+    await run_bot(transport, runner_args, config, flow, mcp_token=config.effective_mcp_token)
 
 
 def main() -> None:
