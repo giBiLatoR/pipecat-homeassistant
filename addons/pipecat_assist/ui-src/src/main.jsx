@@ -279,6 +279,28 @@ function secretPlaceholder(item, key, fallback = "") {
   return secretStatus(item, key) === "configured" ? "configured" : fallback;
 }
 
+function currentAppBaseUrl() {
+  const candidates = [];
+  for (const frame of [window.top, window.parent, window]) {
+    try {
+      if (frame?.location?.href && frame.location.origin === window.location.origin) {
+        candidates.push(frame.location.href);
+      }
+    } catch {
+      // Cross-origin frames cannot be inspected; the current frame remains valid.
+    }
+  }
+
+  const href = candidates.find((item) => new URL(item).pathname.startsWith("/app/")) || window.location.href;
+  const url = new URL(href);
+  url.hash = "";
+  url.search = "";
+  if (!url.pathname.endsWith("/")) {
+    url.pathname = `${url.pathname}/`;
+  }
+  return url.href;
+}
+
 function integrationSummary(integration) {
   if (!integration.enabled) return "disabled";
   if (integration.kind === "home_assistant_mcp") {
@@ -570,7 +592,7 @@ function App() {
   }
 
   async function startMcpOAuth() {
-    const clientBase = new URL(".", window.location.href).href;
+    const clientBase = currentAppBaseUrl();
     const redirectUri = new URL("api/assist/oauth/callback", clientBase).href;
     const authorizeUrl = new URL("/auth/authorize", window.location.origin).href;
     const response = await fetch(API.oauthStart, {
@@ -1474,7 +1496,7 @@ function VoiceTest({ config, flow }) {
               version: "1.4.0",
               about: {
                 library: "pipecat-assist-ui",
-                library_version: "0.1.7",
+                library_version: "0.1.8",
                 platform: "browser",
               },
             },

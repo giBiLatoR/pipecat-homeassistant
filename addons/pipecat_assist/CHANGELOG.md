@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.8
+
+- Fixed Home Assistant OAuth redirect URL generation for app/Ingress paths
+  such as `/app/<app_slug>`.
+
 ## 0.1.7
 
 - Added Home Assistant MCP OAuth login from the Runtime panel.
