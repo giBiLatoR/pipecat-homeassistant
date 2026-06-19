@@ -24,6 +24,9 @@ DEFAULT_INSTRUCTIONS = (
 DEFAULT_GEMINI_TEXT_MODEL = "gemini-3.5-flash"
 DEFAULT_GEMINI_LIVE_MODEL = "models/gemini-3.1-flash-live-preview"
 DEFAULT_GEMINI_LIVE_VOICE = "Charon"
+DEFAULT_OPENAI_TEXT_MODEL = "gpt-5.4-mini"
+DEFAULT_OPENAI_REALTIME_MODEL = "gpt-realtime-2"
+DEFAULT_OPENAI_REALTIME_VOICE = "marin"
 DEFAULT_MCP_URL = "http://supervisor/core/api/mcp"
 SECRET_FIELDS = (
     "api_key",
@@ -138,9 +141,9 @@ def default_integrations() -> list[IntegrationConfig]:
             kind="openai",
             enabled=bool(os.getenv("OPENAI_API_KEY")),
             api_key=os.getenv("OPENAI_API_KEY", ""),
-            default_model=os.getenv("TEXT_MODEL", "gpt-5.4-mini"),
-            default_realtime_model=os.getenv("REALTIME_MODEL", "gpt-realtime-2"),
-            default_voice=os.getenv("REALTIME_VOICE", "marin"),
+            default_model=os.getenv("TEXT_MODEL", DEFAULT_OPENAI_TEXT_MODEL),
+            default_realtime_model=os.getenv("REALTIME_MODEL", DEFAULT_OPENAI_REALTIME_MODEL),
+            default_voice=os.getenv("REALTIME_VOICE", DEFAULT_OPENAI_REALTIME_VOICE),
         ),
         IntegrationConfig(
             id="anthropic",
@@ -270,7 +273,7 @@ class FlowConfig(BaseModel):
 class RuntimeConfig(BaseModel):
     """Persisted runtime configuration edited by the web UI."""
 
-    version: int = 4
+    version: int = 5
     openai_api_key: str = ""
     text_model: str = DEFAULT_GEMINI_TEXT_MODEL
     ha_mcp_url: str = ""
@@ -328,7 +331,8 @@ class RuntimeConfig(BaseModel):
         """Return the integration used by the primary model step."""
 
         step = flow.model_step()
-        return self.integration(step.integration_id if step else flow.provider_id)
+        integration_id = step.integration_id if step and step.integration_id else flow.provider_id
+        return self.integration(integration_id)
 
     @property
     def mcp_integration(self) -> IntegrationConfig | None:
@@ -456,6 +460,50 @@ def _gemini_flow_from_existing(flow: FlowConfig) -> FlowConfig:
     )
 
 
+def _is_realtime_model_for_provider(provider_kind: str, model: str) -> bool:
+    """Return whether a realtime model value belongs to the selected provider."""
+
+    model = (model or "").strip()
+    if not model:
+        return False
+    if provider_kind == "gemini":
+        return "gemini" in model
+    if provider_kind == "openai":
+        return "realtime" in model and not model.startswith("models/")
+    return True
+
+
+def _repair_flow_provider_model(config: RuntimeConfig, flow: FlowConfig) -> bool:
+    """Clear stale cross-provider realtime models left by older UI template switches."""
+
+    model_step = flow.model_step()
+    integration_id = (
+        model_step.integration_id if model_step and model_step.integration_id else flow.provider_id
+    )
+    integration = config.integration(integration_id)
+    if not integration or integration.kind not in {"gemini", "openai"}:
+        return False
+
+    changed = False
+    default_model = (
+        integration.default_realtime_model
+        or (DEFAULT_GEMINI_LIVE_MODEL if integration.kind == "gemini" else DEFAULT_OPENAI_REALTIME_MODEL)
+    )
+
+    if model_step and model_step.model and not _is_realtime_model_for_provider(
+        integration.kind,
+        model_step.model,
+    ):
+        model_step.model = ""
+        changed = True
+
+    if not _is_realtime_model_for_provider(integration.kind, flow.model):
+        flow.model = default_model
+        changed = True
+
+    return changed
+
+
 class ConfigStore:
     """Read and write runtime configuration."""
 
@@ -518,6 +566,21 @@ class ConfigStore:
                 gemini.default_voice = os.getenv("GEMINI_LIVE_VOICE", DEFAULT_GEMINI_LIVE_VOICE)
                 changed = True
 
+        openai = config.integration("openai")
+        if openai:
+            if not openai.default_model:
+                openai.default_model = os.getenv("TEXT_MODEL", DEFAULT_OPENAI_TEXT_MODEL)
+                changed = True
+            if not _is_realtime_model_for_provider("openai", openai.default_realtime_model):
+                openai.default_realtime_model = os.getenv(
+                    "REALTIME_MODEL",
+                    DEFAULT_OPENAI_REALTIME_MODEL,
+                )
+                changed = True
+            if not openai.default_voice:
+                openai.default_voice = os.getenv("REALTIME_VOICE", DEFAULT_OPENAI_REALTIME_VOICE)
+                changed = True
+
         mcp = config.mcp_integration
         if config.ha_mcp_url and mcp and not mcp.base_url:
             mcp.base_url = config.ha_mcp_url
@@ -540,6 +603,12 @@ class ConfigStore:
 
         if config.version < 4:
             config.version = 4
+            changed = True
+
+        if config.version < 5:
+            config.version = 5
+            for flow in config.flows:
+                changed = _repair_flow_provider_model(config, flow) or changed
             changed = True
 
         if changed:

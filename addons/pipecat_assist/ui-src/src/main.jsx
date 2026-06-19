@@ -53,6 +53,9 @@ const REDACTED = "__redacted__";
 const GEMINI_TEXT_MODEL = "gemini-3.5-flash";
 const GEMINI_LIVE_MODEL = "models/gemini-3.1-flash-live-preview";
 const GEMINI_LIVE_VOICE = "Charon";
+const OPENAI_TEXT_MODEL = "gpt-5.4-mini";
+const OPENAI_REALTIME_MODEL = "gpt-realtime-2";
+const OPENAI_REALTIME_VOICE = "marin";
 
 const providerKinds = [
   ["openai", "OpenAI", Cloud],
@@ -214,7 +217,29 @@ function providerDefaults(provider) {
       voice: GEMINI_LIVE_VOICE,
     };
   }
+  if (provider === "openai") {
+    return {
+      model: OPENAI_REALTIME_MODEL,
+      text_model: OPENAI_TEXT_MODEL,
+      voice: OPENAI_REALTIME_VOICE,
+    };
+  }
   return {};
+}
+
+function providerKindForIntegration(config, integrationId) {
+  const integration = config?.integrations?.find(
+    (item) => item.id === integrationId || item.kind === integrationId,
+  );
+  return integration?.kind || integrationId || "";
+}
+
+function realtimeModelMatchesProvider(provider, model) {
+  const value = String(model || "").trim();
+  if (!value) return false;
+  if (provider === "gemini") return value.includes("gemini");
+  if (provider === "openai") return value.includes("realtime") && !value.startsWith("models/");
+  return true;
 }
 
 function stepsFromTemplate(template) {
@@ -230,12 +255,14 @@ function applyTemplate(flow, templateId) {
   const steps = template.id === "custom" && flow.steps?.length ? flow.steps : stepsFromTemplate(template);
   const llm = steps.find((step) => step.kind === "llm");
   const output = steps.find((step) => step.kind === "output" || step.kind === "tts");
+  const stepModel = realtimeModelMatchesProvider(template.provider, llm?.model) ? llm.model : "";
+  const flowModel = realtimeModelMatchesProvider(template.provider, flow.model) ? flow.model : "";
   return {
     ...flow,
     mode: template.mode,
     pipeline_template: template.id,
     provider_id: llm?.integration_id || template.provider,
-    model: llm?.model || defaults.model || flow.model || "",
+    model: stepModel || defaults.model || flowModel || "",
     text_model: defaults.text_model || flow.text_model || "",
     voice: output?.voice || defaults.voice || flow.voice || "",
     steps,
@@ -259,11 +286,21 @@ function syncFlow(flow) {
   const output = flow.steps?.find(
     (step) => (step.kind === "output" || step.kind === "tts") && step.enabled,
   );
+  const providerId = llm?.integration_id || flow.provider_id || "gemini";
+  const defaults = providerDefaults(providerId);
+  const stepModel = realtimeModelMatchesProvider(providerId, llm?.model) ? llm.model : "";
+  const flowModel = realtimeModelMatchesProvider(providerId, flow.model) ? flow.model : "";
+  const steps = (flow.steps || []).map((step) =>
+    step.id === llm?.id && step.model && !realtimeModelMatchesProvider(providerId, step.model)
+      ? { ...step, model: "" }
+      : step,
+  );
   return {
     ...flow,
-    provider_id: llm?.integration_id || flow.provider_id || "gemini",
-    model: llm?.model || flow.model || "",
-    voice: output?.voice || flow.voice || "",
+    steps,
+    provider_id: providerId,
+    model: stepModel || flowModel || defaults.model || "",
+    voice: output?.voice || flow.voice || defaults.voice || "",
     language: flow.language || null,
     max_output_tokens: flow.max_output_tokens ? Number(flow.max_output_tokens) : null,
     reasoning_effort: flow.reasoning_effort || null,
@@ -518,9 +555,9 @@ function App() {
       endpoint: "",
       region: "",
       deployment: "",
-      default_model: kind === "gemini" ? GEMINI_TEXT_MODEL : "",
-      default_realtime_model: kind === "gemini" ? GEMINI_LIVE_MODEL : "",
-      default_voice: kind === "gemini" ? GEMINI_LIVE_VOICE : "",
+      default_model: providerDefaults(kind).text_model || "",
+      default_realtime_model: providerDefaults(kind).model || "",
+      default_voice: providerDefaults(kind).voice || "",
       organization: "",
       project: "",
       access_key_id: "",
@@ -855,9 +892,19 @@ function PipelineView({
               <Field label="Integration">
                 <select
                   value={selectedStep.integration_id || ""}
-                  onChange={(event) =>
-                    updateStep(selectedStep.id, (step) => ({ ...step, integration_id: event.target.value }))
-                  }
+                  onChange={(event) => {
+                    const integrationId = event.target.value;
+                    const defaults = providerDefaults(providerKindForIntegration(config, integrationId));
+                    updateStep(selectedStep.id, (step) => ({
+                      ...step,
+                      integration_id: integrationId,
+                      model: step.kind === "llm" ? defaults.model || "" : step.model,
+                      voice:
+                        step.kind === "output" || step.kind === "tts"
+                          ? defaults.voice || ""
+                          : step.voice,
+                    }));
+                  }}
                 >
                   <option value="">None</option>
                   {config.integrations.map((integration) => (
@@ -1467,7 +1514,7 @@ function VoiceTest({ config, flow }) {
               version: "1.4.0",
               about: {
                 library: "pipecat-assist-ui",
-                library_version: "0.1.13",
+                library_version: "0.1.14",
                 platform: "browser",
               },
             },

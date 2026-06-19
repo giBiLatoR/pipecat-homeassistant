@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.14
+
+- Fixed OpenAI Realtime pipelines that could inherit a Gemini Live model after
+  switching templates or integrations in the UI.
+- Added runtime fallback and startup logging for the selected realtime
+  provider/model before a voice session starts.
+
 ## 0.1.13
 
 - Removed the Home Assistant MCP OAuth flow from the add-on backend and UI.

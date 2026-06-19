@@ -43,6 +43,8 @@ from pipecat.workers.runner import WorkerRunner
 from app.config import (
     DEFAULT_GEMINI_LIVE_MODEL,
     DEFAULT_GEMINI_LIVE_VOICE,
+    DEFAULT_OPENAI_REALTIME_MODEL,
+    DEFAULT_OPENAI_REALTIME_VOICE,
     ConfigStore,
     FlowConfig,
     IntegrationConfig,
@@ -240,15 +242,39 @@ def _output_step(flow: FlowConfig):
     )
 
 
-def _model_name(flow: FlowConfig, integration: IntegrationConfig | None) -> str:
+def _realtime_model_matches_provider(provider_kind: str, model: str) -> bool:
+    model = (model or "").strip()
+    if not model:
+        return False
+    if provider_kind == "gemini":
+        return "gemini" in model
+    if provider_kind == "openai":
+        return "realtime" in model and not model.startswith("models/")
+    return True
+
+
+def _model_name(
+    flow: FlowConfig,
+    integration: IntegrationConfig | None,
+    provider_kind: str | None = None,
+) -> str:
     model_step = flow.model_step()
     model = (
         (model_step.model if model_step else "")
         or flow.model
         or (integration.default_realtime_model if integration else "")
-    )
-    if integration and integration.kind == "gemini" and (not model or model.startswith("gpt-")):
-        return integration.default_realtime_model or DEFAULT_GEMINI_LIVE_MODEL
+    ).strip()
+    kind = integration.kind if integration else provider_kind
+    if kind == "gemini" and not _realtime_model_matches_provider(
+        "gemini",
+        model,
+    ):
+        return (integration.default_realtime_model if integration else "") or DEFAULT_GEMINI_LIVE_MODEL
+    if kind == "openai" and not _realtime_model_matches_provider(
+        "openai",
+        model,
+    ):
+        return (integration.default_realtime_model if integration else "") or DEFAULT_OPENAI_REALTIME_MODEL
     return model
 
 
@@ -258,7 +284,7 @@ def _openai_voice(flow: FlowConfig, integration: IntegrationConfig | None) -> st
         (output_step.voice if output_step else "")
         or flow.voice
         or (integration.default_voice if integration else "")
-        or "marin"
+        or DEFAULT_OPENAI_REALTIME_VOICE
     )
 
 
@@ -365,7 +391,12 @@ async def run_bot(
     """Run one Pipecat session."""
 
     integration = config.model_integration(flow)
-    provider_kind = integration.kind if integration else "openai"
+    if integration:
+        provider_kind = integration.kind
+    elif flow.provider_id in {"gemini", "openai"}:
+        provider_kind = flow.provider_id
+    else:
+        provider_kind = "openai"
     if provider_kind not in {"openai", "gemini"}:
         raise RuntimeError(
             f"Realtime voice runtime for {provider_kind} is not enabled in this build yet"
@@ -378,7 +409,13 @@ async def run_bot(
     if not api_key:
         raise RuntimeError(f"The selected {provider_kind} realtime provider is missing an API key")
 
-    realtime_model = _model_name(flow, integration)
+    realtime_model = _model_name(flow, integration, provider_kind)
+    logger.info(
+        "Starting {} realtime model {} for flow {}",
+        provider_kind,
+        realtime_model,
+        flow.id,
+    )
 
     bridge: HomeAssistantMCPBridge | None = None
     tools_schema = None

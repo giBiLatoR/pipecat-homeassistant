@@ -14,7 +14,7 @@ There are two useful test paths:
 
 ## Requirements
 
-- Pipecat Assist 0.1.13 or newer.
+- Pipecat Assist 0.1.14 or newer.
 - Home Assistant with the Model Context Protocol Server integration enabled.
 - A Google AI Studio API key with access to the Gemini Live API.
 - The `custom_components/pipecat_assist` integration installed if you want to
@@ -26,7 +26,7 @@ the add-on image includes `pipecat-ai[google]`.
 
 ## Configure The Add-On
 
-1. Update Pipecat Assist to version 0.1.13 or newer.
+1. Update Pipecat Assist to version 0.1.14 or newer.
 2. Start the add-on and open the Pipecat Assist web UI.
 3. In Home Assistant, enable **Model Context Protocol Server**.
 4. Open **Runtime > Home Assistant**:
@@ -131,6 +131,9 @@ with voice.
   local origin.
 - Voice `marin` does not work with Gemini: set the Gemini integration voice to
   `Charon` or `Puck`.
+- OpenAI `invalid_model`: select the **Realtime Home** template again or set
+  the OpenAI realtime model to `gpt-realtime-2`, then save. Version 0.1.14 also
+  repairs stale Gemini model IDs when an OpenAI voice session starts.
 
 ## Sources
 
