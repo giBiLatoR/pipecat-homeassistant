@@ -69,7 +69,12 @@ from app.audio_debug import (
     create_audio_debug_session,
     list_audio_recordings,
 )
-from app.mcp_bridge import HomeAssistantMCPBridge, check_mcp
+from app.mcp_bridge import (
+    HomeAssistantMCPBridge,
+    check_mcp,
+    clear_mcp_call_history,
+    list_mcp_call_history,
+)
 from app.text_agent import run_text_conversation
 
 STORE = ConfigStore()
@@ -278,6 +283,16 @@ async def api_reset_mcp(request: Request):
     data["runner_offer_url"] = _offer_url(config, request)
     data["runner_offer_path"] = _offer_path(config)
     return data
+
+
+@app.get("/api/assist/mcp/history")
+async def api_mcp_history():
+    return list_mcp_call_history()
+
+
+@app.delete("/api/assist/mcp/history")
+async def api_clear_mcp_history():
+    return clear_mcp_call_history()
 
 
 @app.post("/api/assist/integrations/{integration_id}/reset")
@@ -1101,13 +1116,17 @@ async def run_bot(
         if flow.greeting.strip():
             context_messages.append({"role": "developer", "content": flow.greeting})
         context = LLMContext(context_messages, active_tools_schema) if active_tools_schema else LLMContext(context_messages)
-        context_aggregator = LLMContextAggregatorPair(
-            context,
-            user_params=LLMUserAggregatorParams(
-                vad_analyzer=SileroVADAnalyzer(),
-                filter_incomplete_user_turns=True,
-            ),
-        )
+        vad_step = _enabled_step(flow, "vad")
+        if vad_step:
+            context_aggregator = LLMContextAggregatorPair(
+                context,
+                user_params=LLMUserAggregatorParams(
+                    vad_analyzer=SileroVADAnalyzer(),
+                    filter_incomplete_user_turns=True,
+                ),
+            )
+        else:
+            context_aggregator = LLMContextAggregatorPair(context)
 
         if bridge and tools_schema and not _flow_enabled(flow):
             await bridge.register_tools_schema(tools_schema, llm)

@@ -11,9 +11,6 @@
 Most settings live in the Pipecat Assist web UI, not in Home Assistant add-on
 options.
 
-`esp32_mode`
-: Startup-time flag for Pipecat's ESP32 SmallWebRTC SDP handling.
-
 `runner_port`
 : Pipecat runner port. Keep the default unless you also know how Home
 Assistant ingress and direct clients reach the add-on.
@@ -24,13 +21,20 @@ Assistant ingress and direct clients reach the add-on.
 ## Web UI
 
 `Assistant`
-: Start or stop the browser voice test for the selected pipeline.
+: Start or stop the browser voice test for the active pipeline. The same active
+pipeline is used by browser tests, ESP32 satellites, and the add-on runner.
 
 `Pipelines`
-: Choose, add, duplicate, delete, and open complete Pipecat runtime profiles.
-After opening a pipeline, edit its colored steps from the canvas. Drag
-supported step types into the pipeline and open Pipecat Flow in the nested
-composer.
+: Add, duplicate, delete, and open complete Pipecat runtime profiles. Opening a
+pipeline does not make it active; use **Set active** in the pipeline detail view
+and save. After opening a pipeline, edit its colored steps from the canvas.
+Pipecat Flow can be added only to composed realtime pipelines; speech-to-speech
+profiles show it as unavailable.
+
+`Pipecat Flow`
+: For composed realtime pipelines, open the nested Flow view to use the official
+[Pipecat Flows Editor](https://flows.pipecat.ai/), paste/export JSON, or load
+the pizza-order example. The default Flow remains pass-through until enabled.
 
 `Integrations`
 : Configure cloud providers and local AI endpoints, including Gemini, OpenAI,
@@ -40,7 +44,8 @@ Assistant MCP. Home Assistant MCP shows Automatic, Manual, or Error state and
 contains the MCP test/reset controls.
 
 `Runtime`
-: Enable audio debug captures and view add-on-managed runtime facts.
+: Enable audio debug captures and inspect recent Home Assistant MCP calls made
+by the assistant.
 
 ### Home Assistant MCP
 
@@ -59,6 +64,12 @@ Open **Runtime**, enable **Record audio in/out**, save, and run a
 voice test or satellite session. The add-on stores separate input and output
 WAV files under `/data/audio-debug` and shows download links in the Runtime
 panel. Clear the captures after troubleshooting if they include private audio.
+
+### Home Assistant MCP call history
+
+Open **Runtime > Home Assistant actions** to inspect the recent MCP tools called
+by the assistant. The history is in-memory, capped to recent calls, and intended
+for debugging what the assistant attempted to do in Home Assistant.
 
 ## Default Gemini Live setup
 
@@ -131,9 +142,11 @@ Build the ESP32 firmware with:
 export PIPECAT_SMALLWEBRTC_URL="http://<ha-lan-ip>:7860/api/offer?token=<satellite-secret>"
 ```
 
-The add-on should run with `esp32_mode: true`. The direct ESP32 authentication
-path will move to the standard Home Assistant token flow as the ESPHome
-integration work lands.
+Pipecat Assist starts the SmallWebRTC runner with ESP32 compatibility enabled.
+The ESP32 satellite uses the active pipeline selected in **Pipelines**, so the
+same model, instructions, greeting, MCP tools, and Pipecat Flow settings apply
+to browser tests and satellites. The direct ESP32 authentication path will move
+to the standard Home Assistant token flow as the ESPHome integration work lands.
 
 ## Home Assistant Conversation entity
 

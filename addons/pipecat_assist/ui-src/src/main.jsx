@@ -10,6 +10,7 @@ import {
   Copy,
   Cpu,
   Download,
+  ExternalLink,
   GitBranch,
   Home,
   Mic2,
@@ -51,6 +52,7 @@ const API = {
   config: appUrl("api/assist/config"),
   status: appUrl("api/assist/status"),
   mcp: appUrl("api/assist/mcp/check"),
+  mcpHistory: appUrl("api/assist/mcp/history"),
   mcpReset: appUrl("api/assist/mcp/reset"),
   audioDebug: appUrl("api/assist/debug/audio"),
   integrationReset: (integrationId) =>
@@ -149,7 +151,6 @@ const templates = [
       ["vad", "vad", "Gemini VAD", ""],
       ["llm", "llm", "Live model", "gemini"],
       ["tools", "tools", "HA MCP tools", "ha-mcp"],
-      ["flow", "flow", "Pipecat Flow", ""],
       ["output", "output", "Native audio", "gemini"],
     ],
   },
@@ -166,7 +167,6 @@ const templates = [
       ["vad", "vad", "Semantic VAD", ""],
       ["llm", "llm", "Realtime model", "openai"],
       ["tools", "tools", "HA MCP tools", "ha-mcp"],
-      ["flow", "flow", "Pipecat Flow", ""],
       ["output", "output", "Audio output", "openai"],
     ],
   },
@@ -183,7 +183,6 @@ const templates = [
       ["vad", "vad", "Nova Sonic VAD", ""],
       ["llm", "llm", "Nova Sonic", "aws-nova-sonic"],
       ["tools", "tools", "HA MCP tools", "ha-mcp"],
-      ["flow", "flow", "Pipecat Flow", ""],
       ["output", "output", "Native audio", "aws-nova-sonic"],
     ],
   },
@@ -597,8 +596,14 @@ function ensureShape(config) {
   shaped.flows = (shaped.flows?.length ? shaped.flows : [clone(defaultFlow)]).map((flow) => {
     const merged = { ...clone(defaultFlow), ...flow };
     if (!merged.conversation_flow?.nodes?.length) merged.conversation_flow = clone(defaultFlow.conversation_flow);
-    if (!merged.steps?.length) return applyTemplate(merged, merged.pipeline_template || "gemini_live_home", shaped);
-    return merged;
+    const normalized = merged.steps?.length
+      ? merged
+      : applyTemplate(merged, merged.pipeline_template || "gemini_live_home", shaped);
+    if (deriveFlowMode(normalized, shaped) === "realtime") {
+      normalized.steps = (normalized.steps || []).filter((step) => step.kind !== "flow");
+      normalized.conversation_flow = { ...normalized.conversation_flow, enabled: false };
+    }
+    return normalized;
   });
   shaped.selected_flow_id ||= shaped.flows[0].id;
   return shaped;
@@ -612,7 +617,9 @@ function syncFlow(flow, config = null) {
   const isRealtime = mode === "realtime";
   const flowModel = isRealtime && !realtimeModelMatchesProvider(providerId, flow.model) ? "" : flow.model || "";
   const flowVoice = isRealtime && !realtimeVoiceMatchesProvider(providerId, flow.voice) ? "" : flow.voice || "";
-  const steps = (flow.steps || []).map((step) => ({
+  const steps = (flow.steps || [])
+    .filter((step) => !(isRealtime && step.kind === "flow"))
+    .map((step) => ({
     ...step,
     model: "",
     voice: "",
@@ -625,6 +632,9 @@ function syncFlow(flow, config = null) {
     provider_id: providerId,
     model: flowModel || defaults.model || "",
     voice: flowVoice || defaults.voice || "",
+    conversation_flow: isRealtime
+      ? { ...(flow.conversation_flow || clone(defaultFlow.conversation_flow)), enabled: false }
+      : flow.conversation_flow,
     mcp_enabled: hasTools,
     language: flow.language || null,
     max_output_tokens: flow.max_output_tokens ? Number(flow.max_output_tokens) : null,
@@ -673,11 +683,10 @@ function formatTimestamp(value) {
   }).format(date);
 }
 
-function integrationSummary(integration) {
+function integrationSummary(integration, config = null) {
   if (!integration.enabled) return "disabled";
   if (integration.kind === "home_assistant_mcp") {
-    if (integration.base_url || secretStatus(integration, "token") === "configured") return "Manual";
-    return "Automatic";
+    return config ? mcpMode(config).label : "Automatic";
   }
   if (
     [
@@ -728,15 +737,6 @@ function runtimeTone(flow) {
   return "custom";
 }
 
-function StatusPill({ validation }) {
-  return (
-    <div className={validation.ok ? "status-pill ok" : "status-pill error"}>
-      {validation.ok ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
-      <span>{validation.ok ? "Ready" : "Configuration error"}</span>
-    </div>
-  );
-}
-
 function Button({ children, icon: Icon, variant = "primary", title, ...props }) {
   return (
     <button className={`button ${variant}`} title={title} {...props}>
@@ -768,11 +768,15 @@ function App() {
   const [config, setConfig] = useState(null);
   const [status, setStatus] = useState(null);
   const [audioDebug, setAudioDebug] = useState({ recordings: [] });
+  const [mcpHistory, setMcpHistory] = useState({ calls: [] });
   const [tab, setTab] = useState("assistant");
   const [pipelineStage, setPipelineStage] = useState("list");
+  const [editingFlowId, setEditingFlowId] = useState("");
+  const [integrationStage, setIntegrationStage] = useState("list");
   const [selectedStepId, setSelectedStepId] = useState("");
   const [selectedIntegrationId, setSelectedIntegrationId] = useState("gemini");
   const [modelOptions, setModelOptions] = useState({});
+  const [mcpResult, setMcpResult] = useState(null);
   const [message, setMessage] = useState({ text: "", tone: "" });
   const [fatalError, setFatalError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -787,10 +791,18 @@ function App() {
     localStorage.setItem("pipecat-assist-theme", theme);
   }, [theme]);
 
-  const selectedFlow = useMemo(() => {
+  const activeFlow = useMemo(() => {
     if (!config) return null;
     return config.flows.find((flow) => flow.id === config.selected_flow_id) || config.flows[0];
   }, [config]);
+
+  const selectedFlow = useMemo(() => {
+    if (!config) return null;
+    if (tab === "pipelines" && editingFlowId) {
+      return config.flows.find((flow) => flow.id === editingFlowId) || activeFlow || config.flows[0];
+    }
+    return activeFlow || config.flows[0];
+  }, [activeFlow, config, editingFlowId, tab]);
 
   const selectedStep = useMemo(() => {
     if (!selectedFlow) return null;
@@ -810,16 +822,17 @@ function App() {
   }, [config, selectedIntegrationId]);
 
   const activeValidation = useMemo(() => {
-    if (!config || !selectedFlow) return { ok: false, errors: ["Configuration is loading"], warnings: [] };
-    return validatePipeline(config, selectedFlow);
-  }, [config, selectedFlow]);
+    if (!config || !activeFlow) return { ok: false, errors: ["Configuration is loading"], warnings: [] };
+    return validatePipeline(config, activeFlow);
+  }, [activeFlow, config]);
 
   async function load() {
     setFatalError("");
-    const [configResponse, statusResponse, audioResponse] = await Promise.all([
+    const [configResponse, statusResponse, audioResponse, mcpHistoryResponse] = await Promise.all([
       fetch(API.config),
       fetch(API.status),
       fetch(API.audioDebug).catch(() => null),
+      fetch(API.mcpHistory).catch(() => null),
     ]);
     if (!configResponse.ok) {
       throw new Error(`Config API failed: ${configResponse.status}`);
@@ -833,8 +846,18 @@ function App() {
     if (audioResponse?.ok) {
       setAudioDebug(await audioResponse.json());
     }
+    if (mcpHistoryResponse?.ok) {
+      setMcpHistory(await mcpHistoryResponse.json());
+    }
     const flow = nextConfig.flows.find((item) => item.id === nextConfig.selected_flow_id) || nextConfig.flows[0];
+    setEditingFlowId((current) => (current && nextConfig.flows.some((item) => item.id === current) ? current : flow.id));
     setSelectedStepId(flow.steps.find((step) => step.kind === "llm")?.id || flow.steps[0]?.id || "");
+  }
+
+  function openTab(id) {
+    setTab(id);
+    if (id === "pipelines") setPipelineStage("list");
+    if (id === "integrations") setIntegrationStage("list");
   }
 
   async function refreshStatus() {
@@ -848,6 +871,21 @@ function App() {
     const response = await fetch(API.audioDebug);
     if (response.ok) {
       setAudioDebug(await response.json());
+    }
+  }
+
+  async function refreshMcpHistory() {
+    const response = await fetch(API.mcpHistory);
+    if (response.ok) {
+      setMcpHistory(await response.json());
+    }
+  }
+
+  async function clearMcpHistory() {
+    const response = await fetch(API.mcpHistory, { method: "DELETE" });
+    if (response.ok) {
+      setMcpHistory(await response.json());
+      setMessage({ text: "MCP history cleared", tone: "ok" });
     }
   }
 
@@ -893,12 +931,9 @@ function App() {
     setModelOptions((current) => ({ ...current, [key]: result.models || [] }));
   }
 
-  function selectFlow(flowId) {
-    updateConfig((draft) => {
-      draft.selected_flow_id = flowId;
-      return draft;
-    });
+  function openFlow(flowId) {
     const flow = config.flows.find((item) => item.id === flowId);
+    setEditingFlowId(flowId);
     setSelectedStepId(flow?.steps.find((step) => step.kind === "llm")?.id || flow?.steps[0]?.id || "");
     setPipelineStage("editor");
   }
@@ -918,9 +953,9 @@ function App() {
     );
     updateConfig((draft) => {
       draft.flows.push(flow);
-      draft.selected_flow_id = id;
       return draft;
     });
+    setEditingFlowId(id);
     setSelectedStepId("llm");
     setPipelineStage("editor");
   }
@@ -931,18 +966,21 @@ function App() {
     copy.name = `${selectedFlow.name} copy`;
     updateConfig((draft) => {
       draft.flows.push(copy);
-      draft.selected_flow_id = copy.id;
       return draft;
     });
+    setEditingFlowId(copy.id);
   }
 
   function deleteFlow() {
     if (config.flows.length <= 1) return;
+    const nextFlow = config.flows.find((item) => item.id !== selectedFlow.id);
     updateConfig((draft) => {
       draft.flows = draft.flows.filter((flow) => flow.id !== selectedFlow.id);
-      draft.selected_flow_id = draft.flows[0].id;
+      if (draft.selected_flow_id === selectedFlow.id) draft.selected_flow_id = draft.flows[0].id;
       return draft;
     });
+    setEditingFlowId(nextFlow?.id || "");
+    setPipelineStage("list");
   }
 
   function addStep(kind = "llm") {
@@ -967,6 +1005,10 @@ function App() {
   }
 
   function insertStep(kind, index = selectedFlow.steps.length) {
+    if (kind === "flow" && deriveFlowMode(selectedFlow, config) === "realtime") {
+      setMessage({ text: "Pipecat Flow can only be added to composed realtime pipelines.", tone: "error" });
+      return;
+    }
     const [, label] = stepTypes.find(([id]) => id === kind) || stepTypes[3];
     const integrationId = kind === "tools" ? "ha-mcp" : "";
     const step = makeStep(kind, label, integrationId);
@@ -1034,24 +1076,25 @@ function App() {
       return draft;
     });
     setSelectedIntegrationId("gemini");
+    setIntegrationStage("list");
   }
 
-  async function save() {
+  async function persistConfig(payload, successText = "Saved") {
     setSaving(true);
     setMessage({ text: "Saving", tone: "" });
-    const payload = {
-      ...config,
-      flows: config.flows.map((flow) => syncFlow(flow, config)),
+    const normalized = {
+      ...payload,
+      flows: payload.flows.map((flow) => syncFlow(flow, payload)),
     };
     const response = await fetch(API.config, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(normalized),
     });
     setSaving(false);
     if (!response.ok) {
       setMessage({ text: await response.text(), tone: "error" });
-      return;
+      return null;
     }
     const nextConfig = ensureShape(await response.json());
     setConfig(nextConfig);
@@ -1061,7 +1104,19 @@ function App() {
       enabled: nextConfig.audio_debug_enabled,
       keep_sessions: nextConfig.audio_debug_keep_sessions,
     }));
-    setMessage({ text: "Saved", tone: "ok" });
+    setMessage({ text: successText, tone: "ok" });
+    return nextConfig;
+  }
+
+  async function save() {
+    await persistConfig(config);
+  }
+
+  async function activateFlow(flowId) {
+    const nextConfig = ensureShape({ ...clone(config), selected_flow_id: flowId });
+    setConfig(nextConfig);
+    setEditingFlowId(flowId);
+    await persistConfig(nextConfig, "Active pipeline saved");
   }
 
   async function checkMcp() {
@@ -1072,11 +1127,13 @@ function App() {
       body: JSON.stringify({ flow_id: selectedFlow.id }),
     });
     const result = await response.json();
+    setMcpResult(result);
     setMessage(
       result.ok
         ? { text: `MCP connected: ${result.tool_count} tools`, tone: "ok" }
         : { text: result.error || "MCP check failed", tone: "error" },
     );
+    await refreshMcpHistory();
   }
 
   async function resetMcpDefaults() {
@@ -1087,6 +1144,7 @@ function App() {
       return;
     }
     setConfig(ensureShape(await response.json()));
+    setMcpResult(null);
     await refreshStatus();
     setMessage({ text: "MCP reset to Supervisor defaults", tone: "ok" });
   }
@@ -1101,6 +1159,7 @@ function App() {
     const nextConfig = ensureShape(await response.json());
     setConfig(nextConfig);
     setSelectedIntegrationId(integrationId);
+    if (integrationId === "ha-mcp") setMcpResult(null);
     await refreshStatus();
     setMessage({ text: "Integration reset to defaults", tone: "ok" });
   }
@@ -1160,7 +1219,7 @@ function App() {
             ["integrations", "Integrations", SlidersHorizontal],
             ["runtime", "Runtime", Settings],
           ].map(([id, label, Icon]) => (
-            <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}>
+            <button key={id} className={tab === id ? "active" : ""} onClick={() => openTab(id)}>
               <Icon size={17} />
               <span>{label}</span>
             </button>
@@ -1184,21 +1243,32 @@ function App() {
                     ? "Integrations"
                     : "Runtime"}
             </h2>
-            <span>{activeValidation.ok ? `${selectedFlow.mode} pipeline` : activeValidation.errors[0]}</span>
+            <span>{activeValidation.ok ? `${activeFlow.mode} pipeline` : activeValidation.errors[0]}</span>
           </div>
           <div className="actions">
-            <Button icon={RefreshCw} variant="secondary" onClick={load} title="Reload" />
-            <StatusPill validation={activeValidation} />
+            {tab === "pipelines" && pipelineStage !== "list" && (
+              <Button
+                icon={ChevronLeft}
+                variant="secondary"
+                onClick={() => setPipelineStage(pipelineStage === "flow" ? "editor" : "list")}
+              >
+                {pipelineStage === "flow" ? "Back to pipeline" : "Back to pipelines"}
+              </Button>
+            )}
+            {tab === "integrations" && integrationStage !== "list" && (
+              <Button icon={ChevronLeft} variant="secondary" onClick={() => setIntegrationStage("list")}>
+                Back to integrations
+              </Button>
+            )}
           </div>
         </header>
 
         {tab === "assistant" && (
           <AssistantView
             config={config}
-            flow={selectedFlow}
+            flow={activeFlow}
             status={status}
-            selectFlow={selectFlow}
-            setTab={setTab}
+            setTab={openTab}
           />
         )}
 
@@ -1215,12 +1285,14 @@ function App() {
             deleteStep={deleteStep}
             duplicateFlow={duplicateFlow}
             deleteFlow={deleteFlow}
-            selectFlow={selectFlow}
+            openFlow={openFlow}
             addFlow={addFlow}
             pipelineStage={pipelineStage}
             setPipelineStage={setPipelineStage}
             save={save}
             saving={saving}
+            activeFlowId={config.selected_flow_id}
+            activateFlow={activateFlow}
           />
         )}
 
@@ -1239,20 +1311,24 @@ function App() {
             resetIntegrationDefaults={resetIntegrationDefaults}
             save={save}
             saving={saving}
+            mcpResult={mcpResult}
+            integrationStage={integrationStage}
+            setIntegrationStage={setIntegrationStage}
           />
         )}
 
         {tab === "runtime" && (
           <RuntimeView
             config={config}
-            flow={selectedFlow}
+            flow={activeFlow}
             status={status}
-            checkMcp={checkMcp}
-            resetMcpDefaults={resetMcpDefaults}
             copyOfferUrl={copyOfferUrl}
             audioDebug={audioDebug}
             refreshAudioDebug={refreshAudioDebug}
             clearAudioDebug={clearAudioDebug}
+            mcpHistory={mcpHistory}
+            refreshMcpHistory={refreshMcpHistory}
+            clearMcpHistory={clearMcpHistory}
             updateConfig={updateConfig}
             updateIntegration={updateIntegration}
             save={save}
@@ -1378,7 +1454,7 @@ function validatePipeline(config, flow) {
   return { ok: errors.length === 0, errors: [...new Set(errors)], warnings: [...new Set(warnings)] };
 }
 
-function AssistantView({ config, flow, status, selectFlow, setTab }) {
+function AssistantView({ config, flow, status, setTab }) {
   const template = pipelineTemplate(flow);
   const Icon = template.icon || Bot;
   const validation = validatePipeline(config, flow);
@@ -1394,36 +1470,10 @@ function AssistantView({ config, flow, status, selectFlow, setTab }) {
           <strong>{validation.ok ? "Ready" : validation.errors[0]}</strong>
         </div>
         <VoiceTest config={config} flow={flow} />
-      </section>
-
-      <section className="panel assistant-side">
-        <div className="panel-head">
-          <div>
-            <h3>Active pipeline</h3>
-            <span>{status?.mcp_token_source || config.mcp_token_source || "MCP pending"}</span>
-          </div>
+        <div className="assistant-actions">
           <Button icon={Workflow} variant="secondary" onClick={() => setTab("pipelines")}>
-            Edit
+            Edit active pipeline
           </Button>
-        </div>
-        <div className="flow-list compact">
-          {config.flows.map((item) => {
-            const TemplateIcon = pipelineTemplate(item).icon || Workflow;
-            const itemValidation = validatePipeline(config, item);
-            return (
-              <button
-                key={item.id}
-                className={`flow-card ${runtimeTone(item)} ${item.id === flow.id ? "active" : ""}`}
-                onClick={() => selectFlow(item.id)}
-              >
-                <TemplateIcon size={18} />
-                <span>
-                  <strong>{item.name}</strong>
-                  <small>{itemValidation.ok ? pipelineTemplate(item).label : itemValidation.errors[0]}</small>
-                </span>
-              </button>
-            );
-          })}
         </div>
       </section>
     </div>
@@ -1703,15 +1753,16 @@ function PipelineView({
   deleteStep,
   duplicateFlow,
   deleteFlow,
-  selectFlow,
+  openFlow,
   addFlow,
   pipelineStage,
   setPipelineStage,
   save,
   saving,
+  activeFlowId,
+  activateFlow,
 }) {
   const validation = validatePipeline(config, flow);
-  const templatesByGroup = [...new Set(templates.map((template) => template.group || "Other"))];
 
   if (pipelineStage === "flow") {
     return (
@@ -1722,15 +1773,12 @@ function PipelineView({
             <span>{flow.name}</span>
           </div>
           <div className="button-row">
-            <Button icon={ChevronLeft} variant="secondary" onClick={() => setPipelineStage("editor")}>
-              Back
-            </Button>
             <Button icon={Save} onClick={save} disabled={saving}>
               Save
             </Button>
           </div>
         </div>
-        <ConversationFlowEditor flow={flow} updateFlow={updateFlow} />
+        <OfficialFlowComposer flow={flow} updateFlow={updateFlow} />
       </section>
     );
   }
@@ -1742,10 +1790,9 @@ function PipelineView({
           <div className="panel-head">
             <div>
               <h3>Pipelines</h3>
-              <span>{config.flows.length} configured</span>
             </div>
             <select
-              className="add-select"
+              className="add-select compact"
               defaultValue=""
               onChange={(event) => {
                 if (event.target.value) addFlow(event.target.value);
@@ -1768,9 +1815,14 @@ function PipelineView({
               return (
                 <button
                   key={item.id}
-                  className={`pipeline-card ${runtimeTone(item)} ${item.id === flow.id ? "active" : ""}`}
-                  onClick={() => selectFlow(item.id)}
+                  className={`pipeline-card ${runtimeTone(item)} ${item.id === activeFlowId ? "active" : ""}`}
+                  onClick={() => openFlow(item.id)}
                 >
+                  {item.id === activeFlowId && (
+                    <span className="active-check" title="Active pipeline">
+                      <CheckCircle2 size={15} />
+                    </span>
+                  )}
                   <Icon size={24} />
                   <span>
                     <strong>{item.name}</strong>
@@ -1784,46 +1836,15 @@ function PipelineView({
             })}
           </div>
         </section>
-
-        <section className="panel">
-          <div className="panel-head">
-            <div>
-              <h3>Starters</h3>
-              <span>Choose a complete pipeline, then edit its steps</span>
-            </div>
-          </div>
-          <div className="template-groups compact">
-            {templatesByGroup.map((group) => (
-              <div className="template-group" key={group}>
-                <span>{group}</span>
-                <div className="template-grid">
-                  {templates
-                    .filter((template) => (template.group || "Other") === group)
-                    .map((template) => {
-                      const Icon = template.icon;
-                      return (
-                        <button
-                          key={template.id}
-                          className={`template-card ${template.accent}`}
-                          onClick={() => addFlow(template.id)}
-                        >
-                          <Icon size={20} />
-                          <strong>{template.label}</strong>
-                          <small>{template.mode === "realtime" ? "speech-to-speech" : "composed"}</small>
-                        </button>
-                      );
-                    })}
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
       </div>
     );
   }
 
-  const flowSupported = flow.mode === "composed";
+  const derivedMode = deriveFlowMode(flow, config);
+  const flowSupported = derivedMode === "composed";
   const selectedTone = selectedStep ? stepTone(selectedStep.kind) : "neutral";
+  const modelIntegration = flowModelIntegration(config, flow);
+  const showOpenAiBargeIn = derivedMode === "realtime" && modelIntegration?.kind === "openai";
 
   return (
     <div className="pipeline-editor-grid">
@@ -1834,9 +1855,16 @@ function PipelineView({
             <span>{flow.mode === "realtime" ? "speech-to-speech" : "composed realtime"}</span>
           </div>
           <div className="button-row">
-            <Button icon={ChevronLeft} variant="secondary" onClick={() => setPipelineStage("list")}>
-              Pipelines
-            </Button>
+            {flow.id === activeFlowId ? (
+              <span className="active-badge">
+                <CheckCircle2 size={15} />
+                Active
+              </span>
+            ) : (
+              <Button icon={CheckCircle2} variant="secondary" onClick={() => activateFlow(flow.id)} disabled={saving}>
+                Set active
+              </Button>
+            )}
             <Button icon={Copy} variant="secondary" onClick={duplicateFlow}>
               Duplicate
             </Button>
@@ -1914,7 +1942,7 @@ function PipelineView({
               <strong>{flowSupported ? "Pipecat Flow editor" : "Unavailable"}</strong>
               <span>
                 {flowSupported
-                  ? "Open the nested composer to edit nodes and functions."
+                  ? "Open the official Pipecat Flows Editor and sync JSON back to this pipeline."
                   : "Official Pipecat Flows are not available for speech-to-speech models."}
               </span>
               <Button icon={Workflow} onClick={() => setPipelineStage("flow")} disabled={!flowSupported}>
@@ -2003,6 +2031,10 @@ function PipelineView({
               <option value="auto">auto</option>
             </select>
           </Field>
+          <p className="field-help wide">
+            Turn detection configures provider/server VAD for speech-to-speech and local VAD for composed realtime
+            pipelines that include a Turn step.
+          </p>
           <Field label="Speed">
             <select value={String(flow.speed)} onChange={(event) => updateFlow((draft) => ({ ...draft, speed: Number(event.target.value || 1) }))}>
               <option value="0.75">0.75x</option>
@@ -2012,12 +2044,20 @@ function PipelineView({
               <option value="1.25">1.25x</option>
             </select>
           </Field>
-          <Toggle
-            checked={flow.interrupt_response}
-            onChange={(value) => updateFlow((draft) => ({ ...draft, interrupt_response: value }))}
-            label="Allow barge-in"
-          />
-          <p className="field-help">Allows the user to interrupt assistant audio while it is speaking.</p>
+          {showOpenAiBargeIn ? (
+            <>
+              <Toggle
+                checked={flow.interrupt_response}
+                onChange={(value) => updateFlow((draft) => ({ ...draft, interrupt_response: value }))}
+                label="OpenAI barge-in"
+              />
+              <p className="field-help">Controls OpenAI Realtime interrupt_response in semantic VAD.</p>
+            </>
+          ) : (
+            <p className="field-help wide">
+              Barge-in is provider-managed for this pipeline, so no local switch is shown.
+            </p>
+          )}
           <Field label="Instructions" wide>
             <textarea rows={8} value={flow.instructions} onChange={(event) => updateFlow((draft) => ({ ...draft, instructions: event.target.value }))} />
           </Field>
@@ -2084,6 +2124,70 @@ function DropSlot({ index, insertStep }) {
     >
       <Plus size={12} />
     </button>
+  );
+}
+
+function OfficialFlowComposer({ flow, updateFlow }) {
+  const initialJson = JSON.stringify(flow.conversation_flow || defaultFlow.conversation_flow, null, 2);
+  const [draftJson, setDraftJson] = useState(initialJson);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    setDraftJson(JSON.stringify(flow.conversation_flow || defaultFlow.conversation_flow, null, 2));
+    setError("");
+  }, [flow.id, flow.conversation_flow]);
+
+  function applyJson(value = draftJson) {
+    const parsed = safeJson(value, null);
+    if (!parsed || !Array.isArray(parsed.nodes)) {
+      setError("JSON must contain a Pipecat Flows nodes array.");
+      return;
+    }
+    updateFlow((current) => ({
+      ...current,
+      conversation_flow: {
+        ...parsed,
+        enabled: true,
+      },
+    }));
+    setError("");
+  }
+
+  function loadPizzaExample() {
+    const value = JSON.stringify(pizzaConversationFlow, null, 2);
+    setDraftJson(value);
+    applyJson(value);
+  }
+
+  return (
+    <div className="official-flow-composer">
+      <div className="flow-frame">
+        <iframe title="Pipecat Flows Editor" src="https://flows.pipecat.ai/" />
+      </div>
+      <div className="flow-sync-panel">
+        <div className="section-title">
+          <strong>Flow JSON</strong>
+          <span>{flow.conversation_flow?.enabled ? "enabled" : "pass-through"}</span>
+        </div>
+        <p className="field-help">
+          The embedded editor is the official Pipecat Flows Editor. Export JSON there, paste it here, and apply it to
+          this pipeline.
+        </p>
+        <textarea rows={12} value={draftJson} onChange={(event) => setDraftJson(event.target.value)} />
+        {error && <div className="validation-card error">{error}</div>}
+        <div className="button-row">
+          <Button icon={ExternalLink} variant="secondary" onClick={() => window.open("https://flows.pipecat.ai/", "_blank", "noopener")}>
+            Open editor
+          </Button>
+          <Button icon={Workflow} variant="secondary" onClick={loadPizzaExample}>
+            Load pizza example
+          </Button>
+          <Button icon={Save} onClick={() => applyJson()}>
+            Apply JSON
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -2393,96 +2497,110 @@ function IntegrationsView({
   resetIntegrationDefaults,
   save,
   saving,
+  mcpResult,
+  integrationStage,
+  setIntegrationStage,
 }) {
-  return (
-    <div className="workspace-grid">
-      <section className="panel main-panel">
-        <div className="panel-head">
-          <div>
-            <h3>Providers</h3>
-            <span>{config.integrations.length} integrations</span>
-          </div>
-          <div className="button-row">
-            <select
-              className="add-select"
-              defaultValue=""
-              onChange={(event) => {
-                if (event.target.value) addIntegration(event.target.value);
-                event.target.value = "";
-              }}
-            >
-              <option value="">Add supported</option>
-              {providerKinds
-                .filter(([kind]) => kind !== "home_assistant_mcp")
-                .map(([kind, label]) => (
-                  <option key={kind} value={kind}>
-                    {label}
-                  </option>
-                ))}
-            </select>
-          </div>
-        </div>
-
-        <div className="integration-list">
-          {config.integrations.map((integration) => {
-            const Icon = providerKinds.find(([id]) => id === integration.kind)?.[2] || Cloud;
-            return (
-              <button
-                key={integration.id}
-                className={
-                  selectedIntegration?.id === integration.id
-                    ? `integration-card active ${integration.enabled ? "enabled" : "disabled"}`
-                    : `integration-card ${integration.enabled ? "enabled" : "disabled"}`
-                }
-                onClick={() => setSelectedIntegrationId(integration.id)}
-              >
-                <Icon size={20} />
-                <span>
-                  <strong>{integration.name}</strong>
-                  <small>{integrationSummary(integration)}</small>
-                </span>
-                <span className={integration.enabled ? "dot on" : "dot"} />
-              </button>
-            );
-          })}
-        </div>
-      </section>
-
-      {selectedIntegration && (
-        <section className="panel inspector integration-editor">
+  if (integrationStage === "list") {
+    return (
+      <div className="integrations-home">
+        <section className="panel main-panel">
           <div className="panel-head">
             <div>
-              <h3>{selectedIntegration.name}</h3>
-              <span>{selectedIntegration.kind === "home_assistant_mcp" ? mcpMode(config).label : kindLabel(selectedIntegration.kind)}</span>
+              <h3>Integrations</h3>
+              <span>{config.integrations.length} providers</span>
             </div>
-            <Button
-              icon={Trash2}
-              variant="danger"
-              onClick={() => deleteIntegration(selectedIntegration.id)}
-              disabled={protectedIntegrationIds.includes(selectedIntegration.id)}
-            />
+            <div className="button-row">
+              <select
+                className="add-select compact"
+                defaultValue=""
+                onChange={(event) => {
+                  if (event.target.value) {
+                    addIntegration(event.target.value);
+                    setIntegrationStage("detail");
+                  }
+                  event.target.value = "";
+                }}
+              >
+                <option value="">Add supported</option>
+                {providerKinds
+                  .filter(([kind]) => kind !== "home_assistant_mcp")
+                  .map(([kind, label]) => (
+                    <option key={kind} value={kind}>
+                      {label}
+                    </option>
+                  ))}
+              </select>
+            </div>
           </div>
 
-          <IntegrationIdentity integration={selectedIntegration} updateIntegration={updateIntegration} />
-          <IntegrationSettings
-            integration={selectedIntegration}
-            config={config}
-            updateIntegration={updateIntegration}
-            modelOptions={modelOptions}
-            loadModelOptions={loadModelOptions}
-            checkMcp={checkMcp}
-            resetMcpDefaults={resetMcpDefaults}
-          />
-          <div className="editor-actions">
-            <Button icon={RotateCcw} variant="secondary" onClick={() => resetIntegrationDefaults(selectedIntegration.id)}>
-              Reset defaults
-            </Button>
-            <Button icon={Save} onClick={save} disabled={saving}>
-              Save integration
-            </Button>
+          <div className="integration-list">
+            {config.integrations.map((integration) => {
+              const Icon = providerKinds.find(([id]) => id === integration.kind)?.[2] || Cloud;
+              return (
+                <button
+                  key={integration.id}
+                  className={`integration-card ${integration.enabled ? "enabled" : "disabled"}`}
+                  onClick={() => {
+                    setSelectedIntegrationId(integration.id);
+                    setIntegrationStage("detail");
+                  }}
+                >
+                  <Icon size={20} />
+                  <span>
+                    <strong>{integration.name}</strong>
+                    <small>{integrationSummary(integration, config)}</small>
+                  </span>
+                  <span className={integration.enabled ? "dot on" : "dot"} />
+                </button>
+              );
+            })}
           </div>
         </section>
-      )}
+      </div>
+    );
+  }
+
+  if (!selectedIntegration) {
+    return <div className="empty-state">Select an integration from the list.</div>;
+  }
+
+  return (
+    <div className="integration-detail">
+      <section className="panel inspector integration-editor">
+        <div className="panel-head">
+          <div>
+            <h3>{selectedIntegration.name}</h3>
+            <span>{selectedIntegration.kind === "home_assistant_mcp" ? mcpMode(config).label : kindLabel(selectedIntegration.kind)}</span>
+          </div>
+          <Button
+            icon={Trash2}
+            variant="danger"
+            onClick={() => deleteIntegration(selectedIntegration.id)}
+            disabled={protectedIntegrationIds.includes(selectedIntegration.id)}
+          />
+        </div>
+
+        <IntegrationIdentity integration={selectedIntegration} updateIntegration={updateIntegration} />
+        <IntegrationSettings
+          integration={selectedIntegration}
+          config={config}
+          updateIntegration={updateIntegration}
+          modelOptions={modelOptions}
+          loadModelOptions={loadModelOptions}
+          checkMcp={checkMcp}
+          resetMcpDefaults={resetMcpDefaults}
+          mcpResult={mcpResult}
+        />
+        <div className="editor-actions">
+          <Button icon={RotateCcw} variant="secondary" onClick={() => resetIntegrationDefaults(selectedIntegration.id)}>
+            Reset defaults
+          </Button>
+          <Button icon={Save} onClick={save} disabled={saving}>
+            Save integration
+          </Button>
+        </div>
+      </section>
     </div>
   );
 }
@@ -2513,7 +2631,15 @@ function IntegrationIdentity({ integration, updateIntegration }) {
   );
 }
 
-function IntegrationSettings({ integration, config, updateIntegration, modelOptions, loadModelOptions, checkMcp, resetMcpDefaults }) {
+function IntegrationSettings({ integration, config, updateIntegration, modelOptions, loadModelOptions, checkMcp, resetMcpDefaults, mcpResult }) {
+  const [manualMcpOpen, setManualMcpOpen] = useState(false);
+
+  useEffect(() => {
+    if (integration.kind === "home_assistant_mcp") {
+      setManualMcpOpen(Boolean(integration.base_url || integration.token_configured || integration.token === REDACTED));
+    }
+  }, [integration.base_url, integration.id, integration.kind, integration.token, integration.token_configured]);
+
   if (integration.kind === "gemini") {
     return (
       <>
@@ -2580,7 +2706,7 @@ function IntegrationSettings({ integration, config, updateIntegration, modelOpti
     const mode = mcpMode(config);
     return (
       <SettingsSection title="Home Assistant MCP" status={mode.label}>
-        <div className={`mcp-mode ${mode.tone}`}>
+        <div className={`mcp-mode ${mode.tone} wide`}>
           <strong>{mode.label}</strong>
           <span>
             {mode.label === "Automatic"
@@ -2590,15 +2716,24 @@ function IntegrationSettings({ integration, config, updateIntegration, modelOpti
                 : "MCP token is not available."}
           </span>
         </div>
-        <div className="runtime-facts wide">
-          <span>{config.effective_mcp_url}</span>
-          <strong>{config.mcp_token_source || "no token"}</strong>
-        </div>
-        <TextSetting integration={integration} field="base_url" label="Manual MCP URL" updateIntegration={updateIntegration} wide />
-        <SecretSetting integration={integration} field="token" label="Manual access token" updateIntegration={updateIntegration} wide />
+        {mcpResult && (
+          <div className={mcpResult.ok ? "mcp-result ok wide" : "mcp-result error wide"}>
+            <strong>{mcpResult.ok ? `${mcpResult.tool_count} tools available` : "MCP test failed"}</strong>
+            <span>{mcpResult.ok ? (mcpResult.tools || []).slice(0, 8).join(", ") : mcpResult.error}</span>
+          </div>
+        )}
+        {manualMcpOpen && (
+          <>
+            <TextSetting integration={integration} field="base_url" label="Manual MCP URL" updateIntegration={updateIntegration} wide />
+            <SecretSetting integration={integration} field="token" label="Manual access token" updateIntegration={updateIntegration} wide />
+          </>
+        )}
         <div className="button-row wide">
           <Button icon={RefreshCw} variant="secondary" onClick={checkMcp}>
             Test MCP
+          </Button>
+          <Button icon={Settings} variant="secondary" onClick={() => setManualMcpOpen((value) => !value)}>
+            {manualMcpOpen ? "Hide manual" : "Manual override"}
           </Button>
           <Button icon={RotateCcw} variant="secondary" onClick={resetMcpDefaults}>
             Automatic defaults
@@ -2944,6 +3079,12 @@ async function offerErrorMessage(response) {
 
 function friendlyWebRtcError(err) {
   const message = err?.message || String(err);
+  if (err?.name === "NotAllowedError" || err?.name === "PermissionDeniedError") {
+    return "Microphone access is blocked. Allow microphone access in the browser and start the voice test again.";
+  }
+  if (err?.name === "NotFoundError") {
+    return "No microphone was found for this browser session.";
+  }
   if (message === "Failed to fetch") {
     return "Could not reach the SmallWebRTC offer endpoint. Check that the add-on is running in Home Assistant Ingress.";
   }
@@ -3068,7 +3209,7 @@ function VoiceTest({ config, flow }) {
               version: "1.4.0",
               about: {
                 library: "pipecat-assist-ui",
-                library_version: "0.1.18",
+                library_version: "0.1.19",
                 platform: "browser",
               },
             },
@@ -3163,7 +3304,7 @@ function VoiceTest({ config, flow }) {
       <div className="voice-copy">
         <strong>{stateLabel}</strong>
         <span>{displayDetail}</span>
-        <audio ref={audioRef} autoPlay controls />
+        <audio ref={audioRef} autoPlay playsInline />
       </div>
       <div className="voice-controlbar">
         <Button
@@ -3265,17 +3406,65 @@ function AudioDebugDownload({ file, label }) {
   );
 }
 
+function formatDuration(ms) {
+  const value = Number(ms || 0);
+  if (!value) return "";
+  if (value < 1000) return `${Math.round(value)} ms`;
+  return `${(value / 1000).toFixed(1)} s`;
+}
+
+function McpHistoryPanel({ mcpHistory, refreshMcpHistory, clearMcpHistory }) {
+  const calls = mcpHistory?.calls || [];
+  return (
+    <section className="mcp-history-panel">
+      <div className="panel-head">
+        <div>
+          <h3>Home Assistant actions</h3>
+          <span>{calls.length ? `${calls.length} recent MCP calls` : "no MCP calls yet"}</span>
+        </div>
+        <div className="button-row">
+          <Button icon={RefreshCw} variant="secondary" onClick={refreshMcpHistory}>
+            Refresh
+          </Button>
+          <Button icon={Trash2} variant="danger" onClick={clearMcpHistory} disabled={!calls.length}>
+            Clear
+          </Button>
+        </div>
+      </div>
+      <div className="mcp-history-list">
+        {calls.length ? (
+          calls.map((call) => (
+            <div key={call.id} className={call.ok ? "mcp-call ok" : "mcp-call error"}>
+              <div className="mcp-call-head">
+                <strong>{call.tool || "unknown tool"}</strong>
+                <span>{[formatTimestamp(call.started_at), formatDuration(call.duration_ms)].filter(Boolean).join(" / ")}</span>
+              </div>
+              {call.arguments && <pre>{call.arguments}</pre>}
+              <small>{call.ok ? call.result || "Tool completed" : call.error || "Tool failed"}</small>
+            </div>
+          ))
+        ) : (
+          <div className="empty-state">No Home Assistant MCP calls recorded yet.</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function RuntimeView({
   config,
   audioDebug,
   refreshAudioDebug,
   clearAudioDebug,
+  mcpHistory,
+  refreshMcpHistory,
+  clearMcpHistory,
   updateConfig,
   save,
   saving,
 }) {
   return (
-    <div className="workspace-grid">
+    <div className="runtime-home">
       <section className="panel main-panel">
         <AudioDebugPanel
           config={config}
@@ -3289,21 +3478,12 @@ function RuntimeView({
             Save runtime
           </Button>
         </div>
-      </section>
-
-      <section className="panel inspector">
-        <div className="panel-head">
-          <div>
-            <h3>Add-on runtime</h3>
-            <span>Managed by Home Assistant</span>
-          </div>
-        </div>
-        <div className="runtime-facts stacked">
-          <span>Runner port is configured in Home Assistant add-on options.</span>
-          <strong>{config.runner_port || 7860}</strong>
-          <span>ESP32 mode is also managed by Home Assistant add-on options.</span>
-          <strong>{config.esp32_mode ? "enabled" : "disabled"}</strong>
-        </div>
+        <div className="divider" />
+        <McpHistoryPanel
+          mcpHistory={mcpHistory}
+          refreshMcpHistory={refreshMcpHistory}
+          clearMcpHistory={clearMcpHistory}
+        />
       </section>
     </div>
   );

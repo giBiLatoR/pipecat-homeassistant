@@ -330,12 +330,6 @@ def default_steps() -> list[PipelineStepConfig]:
             integration_id="ha-mcp",
         ),
         PipelineStepConfig(
-            id="flow",
-            kind="flow",
-            label="Conversation flow",
-            enabled=False,
-        ),
-        PipelineStepConfig(
             id="output",
             kind="output",
             label="Native audio",
@@ -434,7 +428,7 @@ class FlowConfig(BaseModel):
 class RuntimeConfig(BaseModel):
     """Persisted runtime configuration edited by the web UI."""
 
-    version: int = 9
+    version: int = 10
     openai_api_key: str = ""
     text_model: str = DEFAULT_GEMINI_TEXT_MODEL
     ha_mcp_url: str = ""
@@ -442,7 +436,7 @@ class RuntimeConfig(BaseModel):
     satellite_shared_secret: str = ""
     runner_host: str = ""
     runner_port: int = Field(default=7860, ge=1024, le=65535)
-    esp32_mode: bool = False
+    esp32_mode: bool = True
     enable_default_ice_servers: bool = False
     audio_debug_enabled: bool = False
     audio_debug_keep_sessions: int = Field(default=10, ge=1, le=100)
@@ -586,7 +580,7 @@ def default_config_from_environment() -> RuntimeConfig:
         satellite_shared_secret=os.getenv("SATELLITE_SHARED_SECRET", ""),
         runner_host=os.getenv("RUNNER_HOST", ""),
         runner_port=_env_int("RUNNER_PORT", 7860),
-        esp32_mode=_env_bool("ESP32_MODE", False),
+        esp32_mode=_env_bool("ESP32_MODE", True),
         audio_debug_enabled=_env_bool("AUDIO_DEBUG_ENABLED", False),
         audio_debug_keep_sessions=min(100, max(1, _env_int("AUDIO_DEBUG_KEEP_SESSIONS", 10))),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
@@ -708,6 +702,32 @@ def _repair_flow_provider_model(config: RuntimeConfig, flow: FlowConfig) -> bool
         flow.voice = default_voice
         changed = True
 
+    return changed
+
+
+def _strip_unsupported_s2s_flow_steps(config: RuntimeConfig, flow: FlowConfig) -> bool:
+    """Remove Pipecat Flow steps from speech-to-speech pipelines."""
+
+    model_step = flow.model_step()
+    integration_id = (
+        model_step.integration_id if model_step and model_step.integration_id else flow.provider_id
+    )
+    integration = config.integration(integration_id)
+    provider_kind = integration.kind if integration else flow.provider_id
+    has_stt = any(step.kind == "stt" and step.enabled for step in flow.steps)
+    has_tts = any(step.kind == "tts" and step.enabled for step in flow.steps)
+    is_s2s = flow.mode == "realtime" or (
+        not has_stt and not has_tts and provider_kind in {"gemini", "openai", "aws_nova_sonic"}
+    )
+    if not is_s2s:
+        return False
+
+    original_count = len(flow.steps)
+    flow.steps = [step for step in flow.steps if step.kind != "flow"]
+    changed = len(flow.steps) != original_count
+    if flow.conversation_flow.get("enabled"):
+        flow.conversation_flow["enabled"] = False
+        changed = True
     return changed
 
 
@@ -937,8 +957,15 @@ class ConfigStore:
                     changed = True
             changed = True
 
+        if config.version < 10:
+            config.version = 10
+            for flow in config.flows:
+                changed = _strip_unsupported_s2s_flow_steps(config, flow) or changed
+            changed = True
+
         for flow in config.flows:
             changed = _repair_flow_provider_model(config, flow) or changed
+            changed = _strip_unsupported_s2s_flow_steps(config, flow) or changed
         changed = _repair_mcp_url_overrides(config) or changed
 
         if changed:

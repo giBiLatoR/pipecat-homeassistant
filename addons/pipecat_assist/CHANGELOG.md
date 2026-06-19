@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.19
+
+- Separated active pipeline selection from opening a pipeline for editing, with
+  an explicit Set active action and active checkmark on pipeline cards.
+- Reworked Pipelines, Integrations, Assistant, and Runtime navigation into
+  contextual list/detail screens and removed redundant right columns.
+- Removed unsupported Pipecat Flow steps from speech-to-speech presets while
+  keeping a disabled palette tile to explain availability.
+- Added an official Pipecat Flows Editor surface with JSON import/export and a
+  pizza example loader for composed realtime pipelines.
+- Added visible MCP test results, a readable Home Assistant MCP call history,
+  and simplified automatic Supervisor MCP status.
+- Removed the exposed ESP32 mode add-on option; the runner now starts with ESP32
+  SmallWebRTC compatibility enabled.
+- Improved dark mode contrast, microphone-permission errors, and the assistant
+  voice test surface.
+
 ## 0.1.18
 
 - Reworked the add-on UI into a product-style flow with Assistant-first

@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
+import uuid
+from collections import deque
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -17,6 +22,117 @@ from pipecat.services.mcp_service import MCPClient
 
 class MCPAuthenticationError(RuntimeError):
     """Raised when Home Assistant rejects the MCP bearer token."""
+
+
+MCP_CALL_HISTORY: deque[dict[str, Any]] = deque(maxlen=100)
+
+
+def _compact_json(value: Any, limit: int = 1200) -> str:
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+        except TypeError:
+            text = str(value)
+    if len(text) > limit:
+        return f"{text[:limit]}..."
+    return text
+
+
+def list_mcp_call_history() -> dict[str, Any]:
+    """Return recent Home Assistant MCP tool calls."""
+
+    return {"calls": list(reversed(MCP_CALL_HISTORY))}
+
+
+def clear_mcp_call_history() -> dict[str, Any]:
+    """Clear recent Home Assistant MCP tool calls."""
+
+    MCP_CALL_HISTORY.clear()
+    return list_mcp_call_history()
+
+
+def _new_history_item(name: str, arguments: dict[str, Any]) -> tuple[dict[str, Any], float]:
+    return (
+        {
+            "id": uuid.uuid4().hex[:12],
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "tool": name,
+            "arguments": _compact_json(arguments),
+        },
+        time.perf_counter(),
+    )
+
+
+def _finish_history_item(
+    history_item: dict[str, Any],
+    started: float,
+    *,
+    ok: bool,
+    result: str = "",
+    error: str = "",
+) -> None:
+    history_item.update(
+        {
+            "ok": ok,
+            "duration_ms": round((time.perf_counter() - started) * 1000),
+        }
+    )
+    if ok:
+        history_item["result"] = _compact_json(result, limit=1000)
+    else:
+        history_item["error"] = error or result or "MCP tool failed"
+    MCP_CALL_HISTORY.append(history_item)
+
+
+class RecordingMCPClient(MCPClient):
+    """Pipecat MCP client that records tool calls for the Runtime UI."""
+
+    async def _call_tool(self, session, function_name, arguments, result_callback):
+        history_item, started = _new_history_item(function_name, dict(arguments or {}))
+        logger.debug("Calling mcp tool '{}'", function_name)
+        results = None
+        error = ""
+        try:
+            results = await session.call_tool(function_name, arguments=arguments)
+        except Exception as err:
+            error = f"Error calling mcp tool {function_name}: {err}"
+            logger.error(error)
+
+        response = ""
+        if results:
+            if hasattr(results, "content") and results.content:
+                for index, content in enumerate(results.content):
+                    if hasattr(content, "text") and content.text:
+                        logger.debug("Tool response chunk {}: {}", index, content.text)
+                        response += content.text
+            else:
+                logger.error("Error getting content from {} results.", function_name)
+
+        if function_name in self._tools_output_filters:
+            try:
+                response = self._tools_output_filters[function_name](response)
+                logger.debug("Final response after filter: {}", response)
+            except Exception:
+                logger.error("Error applying output filter for {}", function_name)
+                response = ""
+
+        ok = bool(response and isinstance(response, str) and not error)
+        if ok:
+            logger.info("Tool '{}' completed successfully", function_name)
+            logger.debug("Final response: {}", response)
+        else:
+            response = "Sorry, could not call the mcp tool"
+
+        _finish_history_item(
+            history_item,
+            started,
+            ok=ok,
+            result=response,
+            error=error,
+        )
+        await result_callback(response)
 
 
 class HomeAssistantMCPBridge:
@@ -43,7 +159,7 @@ class HomeAssistantMCPBridge:
         if self.client:
             return
         await self._preflight_auth()
-        self.client = MCPClient(
+        self.client = RecordingMCPClient(
             server_params=StreamableHttpParameters(
                 url=self.url,
                 headers={"Authorization": f"Bearer {self.token}"},
@@ -116,14 +232,22 @@ class HomeAssistantMCPBridge:
 
         if not self.client:
             raise RuntimeError("MCP bridge is not started")
-        session = self.client._ensure_connected()  # Pipecat exposes no public call_tool yet.
-        result = await session.call_tool(name, arguments=arguments)
-        chunks: list[str] = []
-        for content in getattr(result, "content", []) or []:
-            text = getattr(content, "text", None)
-            if text:
-                chunks.append(text)
-        return "\n".join(chunks) if chunks else "Tool returned no text content."
+        history_item, started = _new_history_item(name, arguments)
+        try:
+            session = self.client._ensure_connected()  # Pipecat exposes no public call_tool yet.
+            result = await session.call_tool(name, arguments=arguments)
+            chunks: list[str] = []
+            for content in getattr(result, "content", []) or []:
+                text = getattr(content, "text", None)
+                if text:
+                    chunks.append(text)
+            text_result = "\n".join(chunks) if chunks else "Tool returned no text content."
+            _finish_history_item(history_item, started, ok=True, result=text_result)
+            return text_result
+        except Exception as err:
+            _finish_history_item(history_item, started, ok=False, error=str(err))
+            raise
+
 
 
 async def check_mcp(url: str, token: str, tool_allowlist: Sequence[str] | None = None) -> dict[str, Any]:
