@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.21
+
+- Replaced the Pipecat Flows iframe/JSON workflow with an embedded visual
+  composer that stores Pipecat Flows Editor-compatible nodes, edges, messages,
+  functions, post-actions, and MCP tool bindings.
+- Added built-in filtered flow examples, including the official minimal and
+  food ordering examples plus a Home Assistant MCP pizza-ordering starter.
+- Fixed pipeline action button alignment, improved danger-button contrast in
+  dark mode, and defaulted pipeline language fields to `en`.
+- Taught the runtime to execute the official Pipecat Flows JSON shape in
+  addition to the earlier Home Assistant flow shape.
+
 ## 0.1.20
 
 - Fixed browser voice tests hanging on "Connecting audio" after the add-on

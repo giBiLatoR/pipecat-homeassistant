@@ -10,7 +10,6 @@ import {
   Copy,
   Cpu,
   Download,
-  ExternalLink,
   GitBranch,
   Home,
   Mic2,
@@ -336,7 +335,7 @@ const defaultFlow = {
   text_model: GEMINI_TEXT_MODEL,
   voice: GEMINI_LIVE_VOICE,
   speed: 1,
-  language: "",
+  language: "en",
   instructions:
     "You are a realtime Home Assistant voice agent. Speak naturally and briefly. Use Home Assistant MCP tools only when the user clearly asks to control, inspect, or automate the home. Never invent device state. If a room, device, or action is ambiguous, ask one short clarification.",
   greeting: "Greet the user briefly and wait for their request.",
@@ -419,6 +418,263 @@ const pizzaConversationFlow = {
   ],
 };
 
+const FLOW_SCHEMA_ID = "https://flows.pipecat.ai/schema/flow.json";
+
+const officialMinimalFlow = {
+  $id: FLOW_SCHEMA_ID,
+  meta: { name: "Minimal", version: "0.1.0", description: "Minimal initial to end flow" },
+  nodes: [
+    {
+      id: "initial",
+      type: "initial",
+      position: { x: 80, y: 120 },
+      data: {
+        label: "Initial",
+        task_messages: [{ role: "system", content: "Hello! This is a minimal flow." }],
+        functions: [{ name: "done", description: "Continue to end", next_node_id: "end" }],
+      },
+    },
+    {
+      id: "end",
+      type: "end",
+      position: { x: 390, y: 120 },
+      data: {
+        label: "End",
+        task_messages: [{ role: "system", content: "Thank you and goodbye." }],
+        post_actions: [{ type: "end_conversation" }],
+      },
+    },
+  ],
+  edges: [{ id: "func-initial-done-end", source: "initial", target: "end", label: "done" }],
+};
+
+const officialFoodOrderingFlow = {
+  $id: FLOW_SCHEMA_ID,
+  meta: {
+    name: "Food Ordering",
+    version: "0.1.0",
+    description: "Initial to Pizza/Sushi branch, confirm, and end",
+  },
+  nodes: [
+    {
+      id: "initial",
+      type: "initial",
+      position: { x: 80, y: 150 },
+      data: {
+        label: "Initial",
+        role_messages: [
+          {
+            role: "system",
+            content:
+              "You are a helpful food ordering assistant. You must always use the available functions to progress the conversation.",
+          },
+        ],
+        task_messages: [
+          {
+            role: "system",
+            content: "Welcome the user warmly and ask if they would like to order pizza or sushi today.",
+          },
+        ],
+        functions: [
+          { name: "choose_pizza", description: "User wants to order pizza", next_node_id: "pizza_task" },
+          { name: "choose_sushi", description: "User wants to order sushi", next_node_id: "sushi_task" },
+        ],
+      },
+    },
+    {
+      id: "pizza_task",
+      type: "node",
+      position: { x: 390, y: 70 },
+      data: {
+        label: "Pizza Task",
+        task_messages: [
+          {
+            role: "system",
+            content:
+              "Ask what size and type of pizza the user wants. Use select_pizza_order when they provide both size and type. Pricing: small $10, medium $15, large $20.",
+          },
+        ],
+        functions: [
+          {
+            name: "select_pizza_order",
+            description: "Record pizza order details",
+            properties: {
+              size: { type: "string", enum: ["small", "medium", "large"], description: "Pizza size" },
+              type: {
+                type: "string",
+                enum: ["pepperoni", "cheese", "supreme", "vegetarian"],
+                description: "Pizza type",
+              },
+            },
+            required: ["size", "type"],
+            next_node_id: "confirm",
+          },
+        ],
+      },
+    },
+    {
+      id: "sushi_task",
+      type: "node",
+      position: { x: 390, y: 230 },
+      data: {
+        label: "Sushi Task",
+        task_messages: [
+          {
+            role: "system",
+            content:
+              "Ask how many rolls and what type of sushi the user wants. Use select_sushi_order when they provide both count and type. Pricing: $8 per roll.",
+          },
+        ],
+        functions: [
+          {
+            name: "select_sushi_order",
+            description: "Record sushi order details",
+            properties: {
+              count: { type: "integer", minimum: 1, maximum: 10, description: "Number of rolls" },
+              type: {
+                type: "string",
+                enum: ["california", "spicy tuna", "rainbow", "dragon"],
+                description: "Sushi type",
+              },
+            },
+            required: ["count", "type"],
+            next_node_id: "confirm",
+          },
+        ],
+      },
+    },
+    {
+      id: "confirm",
+      type: "node",
+      position: { x: 710, y: 150 },
+      data: {
+        label: "Confirm",
+        task_messages: [
+          {
+            role: "system",
+            content:
+              "Read the order details back to the user. Use complete_order if they confirm, or revise_order if they want to make changes.",
+          },
+        ],
+        functions: [
+          { name: "complete_order", description: "User confirms the order is correct", next_node_id: "end" },
+          { name: "revise_order", description: "User wants to change the order", next_node_id: "initial" },
+        ],
+      },
+    },
+    {
+      id: "end",
+      type: "end",
+      position: { x: 1030, y: 150 },
+      data: {
+        label: "End",
+        task_messages: [{ role: "system", content: "Thank the user for their order and end politely." }],
+        post_actions: [{ type: "end_conversation" }],
+      },
+    },
+  ],
+  edges: [],
+};
+
+const officialHomePizzaFlow = {
+  $id: FLOW_SCHEMA_ID,
+  meta: {
+    name: "Home Pizza via MCP",
+    version: "0.1.0",
+    description: "Guided pizza order that can finish by calling a Home Assistant MCP tool",
+  },
+  nodes: [
+    {
+      id: "home_router",
+      type: "initial",
+      position: { x: 80, y: 140 },
+      data: {
+        label: "Home Router",
+        role_messages: [
+          {
+            role: "system",
+            content:
+              "You are a realtime Home Assistant voice agent. Speak naturally and briefly. Use Home Assistant MCP tools only when the user clearly asks to control, inspect, or automate the home.",
+          },
+        ],
+        task_messages: [
+          {
+            role: "system",
+            content:
+              "Handle normal smart-home requests. If the user wants pizza, call start_pizza_order and guide the dedicated ordering flow.",
+          },
+        ],
+        functions: [
+          {
+            name: "start_pizza_order",
+            description: "Start a guided pizza ordering conversation",
+            next_node_id: "pizza_order",
+          },
+        ],
+        respond_immediately: true,
+      },
+    },
+    {
+      id: "pizza_order",
+      type: "node",
+      position: { x: 420, y: 140 },
+      data: {
+        label: "Pizza Order",
+        task_messages: [
+          {
+            role: "system",
+            content:
+              "Collect pizza size, toppings, delivery details, and explicit confirmation. After confirmation, call place_pizza_order.",
+          },
+        ],
+        functions: [
+          {
+            name: "place_pizza_order",
+            description: "Place the pizza order through Home Assistant MCP after confirmation",
+            properties: {
+              size: { type: "string", enum: ["small", "medium", "large"], description: "Pizza size" },
+              toppings: { type: "array", description: "Requested toppings" },
+              address: { type: "string", description: "Delivery address" },
+              notes: { type: "string", description: "Optional order notes" },
+            },
+            required: ["size", "toppings"],
+            mcp_tool: "",
+            next_node_id: "done",
+          },
+        ],
+      },
+    },
+    {
+      id: "done",
+      type: "end",
+      position: { x: 780, y: 140 },
+      data: {
+        label: "Done",
+        task_messages: [{ role: "system", content: "Confirm the result briefly and end the conversation." }],
+        post_actions: [{ type: "end_conversation" }],
+      },
+    },
+  ],
+  edges: [],
+};
+
+const flowExampleTemplates = [
+  { id: "passthrough", name: "Pass-through", description: "Transparent flow with no routing", flow: null },
+  { id: "minimal", name: "Minimal", description: "Official minimal initial to end example", flow: officialMinimalFlow },
+  {
+    id: "food_ordering",
+    name: "Food Ordering",
+    description: "Official branching food ordering example",
+    flow: officialFoodOrderingFlow,
+  },
+  {
+    id: "home_pizza_mcp",
+    name: "Home Pizza via MCP",
+    description: "HA-oriented pizza flow with a final MCP tool call",
+    flow: officialHomePizzaFlow,
+  },
+];
+
 function slugify(value) {
   return value
     .toLowerCase()
@@ -429,6 +685,171 @@ function slugify(value) {
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function messagesToText(messages, fallback = "") {
+  if (typeof messages === "string") return messages || fallback;
+  if (!Array.isArray(messages)) return fallback;
+  return messages
+    .map((item) => (item && typeof item === "object" ? item.content : ""))
+    .filter(Boolean)
+    .join("\n") || fallback;
+}
+
+function textToMessages(value) {
+  const content = String(value || "").trim();
+  return content ? [{ role: "system", content }] : [];
+}
+
+function deriveEditorNodeType(node, index = 0) {
+  const data = node?.data && typeof node.data === "object" ? node.data : node || {};
+  if (["initial", "node", "end"].includes(node?.type)) return node.type;
+  if ((data.post_actions || []).some((action) => action?.type === "end_conversation")) return "end";
+  if (index === 0 || data.role_messages || data.role_message) return "initial";
+  return "node";
+}
+
+function deriveFlowEdges(nodes) {
+  return nodes.flatMap((node) => {
+    const functions = Array.isArray(node.data?.functions) ? node.data.functions : [];
+    return functions.flatMap((fn) => {
+      if (fn?.decision?.default_next_node_id) {
+        return [
+          {
+            id: `func-${node.id}-${fn.name || "decision"}-${fn.decision.default_next_node_id}`,
+            source: node.id,
+            target: fn.decision.default_next_node_id,
+            label: `${fn.name || "decision"} default`,
+          },
+        ];
+      }
+      if (!fn?.next_node_id) return [];
+      return [
+        {
+          id: `func-${node.id}-${fn.name || "next"}-${fn.next_node_id}`,
+          source: node.id,
+          target: fn.next_node_id,
+          label: fn.name || "next",
+        },
+      ];
+    });
+  });
+}
+
+function isOfficialFlowJson(value) {
+  return Array.isArray(value?.nodes) && value.nodes.some((node) => node?.data || node?.position || node?.type);
+}
+
+function legacyConversationToEditorFlow(value, name = "Conversation Flow") {
+  const nodes = Array.isArray(value?.nodes) && value.nodes.length ? value.nodes : defaultFlow.conversation_flow.nodes;
+  return {
+    $id: FLOW_SCHEMA_ID,
+    meta: { name, version: "0.1.0", description: "Converted Home Assistant conversation flow" },
+    nodes: nodes.map((node, index) => ({
+      id: String(node.id || slugify(node.label || `node-${index + 1}`)),
+      type: deriveEditorNodeType(node, index),
+      position: node.position || { x: 80 + index * 300, y: 130 + (index % 2) * 130 },
+      data: {
+        label: node.label || node.id || `Node ${index + 1}`,
+        role_messages: textToMessages(node.role_message),
+        task_messages: textToMessages(node.task || "Continue the conversation."),
+        functions: Array.isArray(node.functions) ? clone(node.functions) : [],
+        pre_actions: Array.isArray(node.pre_actions) ? clone(node.pre_actions) : undefined,
+        post_actions: Array.isArray(node.post_actions) ? clone(node.post_actions) : undefined,
+        context_strategy: node.context_strategy,
+        respond_immediately: node.respond_immediately ?? true,
+      },
+    })),
+    edges: [],
+  };
+}
+
+function normalizeEditorFlow(value, name = "Conversation Flow") {
+  const source = value?.nodes?.length ? value : defaultFlow.conversation_flow;
+  const flow = isOfficialFlowJson(source) ? clone(source) : legacyConversationToEditorFlow(source, name);
+  flow.$id = flow.$id || FLOW_SCHEMA_ID;
+  flow.meta = {
+    name: flow.meta?.name || name,
+    version: flow.meta?.version || "0.1.0",
+    description: flow.meta?.description || "",
+  };
+  flow.nodes = (flow.nodes || []).map((node, index) => {
+    const data = node.data && typeof node.data === "object" ? clone(node.data) : {};
+    return {
+      id: String(node.id || slugify(data.label || `node-${index + 1}`)),
+      type: deriveEditorNodeType({ ...node, data }, index),
+      position: node.position || { x: 80 + index * 300, y: 130 + (index % 2) * 130 },
+      data: {
+        label: data.label || node.label || node.id || `Node ${index + 1}`,
+        role_messages: Array.isArray(data.role_messages) ? data.role_messages : textToMessages(data.role_message),
+        task_messages: Array.isArray(data.task_messages)
+          ? data.task_messages
+          : textToMessages(data.task || "Continue the conversation."),
+        functions: Array.isArray(data.functions) ? data.functions : [],
+        pre_actions: Array.isArray(data.pre_actions) ? data.pre_actions : undefined,
+        post_actions: Array.isArray(data.post_actions) ? data.post_actions : undefined,
+        context_strategy: data.context_strategy,
+        respond_immediately: data.respond_immediately ?? true,
+      },
+    };
+  });
+  if (!flow.nodes.some((node) => node.type === "initial") && flow.nodes[0]) {
+    flow.nodes[0].type = "initial";
+  }
+  flow.edges = deriveFlowEdges(flow.nodes);
+  return flow;
+}
+
+function editorFlowToConversationFlow(editorFlow, enabled = true) {
+  const flow = normalizeEditorFlow(editorFlow, editorFlow?.meta?.name || "Conversation Flow");
+  const initial = flow.nodes.find((node) => node.type === "initial") || flow.nodes[0];
+  return {
+    ...flow,
+    enabled,
+    initial_node_id: initial?.id || "",
+    edges: deriveFlowEdges(flow.nodes),
+  };
+}
+
+function createPassThroughEditorFlow(flow) {
+  return normalizeEditorFlow(
+    {
+      $id: FLOW_SCHEMA_ID,
+      meta: {
+        name: flow?.name || "Pass-through",
+        version: "0.1.0",
+        description: "Transparent flow with no routing",
+      },
+      nodes: [
+        {
+          id: "passthrough",
+          type: "initial",
+          position: { x: 90, y: 150 },
+          data: {
+            label: "Pass-through",
+            role_messages: textToMessages(flow?.instructions || defaultFlow.instructions),
+            task_messages: textToMessages("Continue the conversation normally without changing pipeline behavior."),
+            functions: [],
+            respond_immediately: false,
+          },
+        },
+      ],
+      edges: [],
+    },
+    flow?.name || "Pass-through",
+  );
+}
+
+function makeFlowNodeId(label, nodes) {
+  const base = slugify(label || "node") || "node";
+  let candidate = base;
+  let index = 2;
+  const used = new Set(nodes.map((node) => node.id));
+  while (used.has(candidate)) {
+    candidate = `${base}-${index}`;
+    index += 1;
+  }
+  return candidate;
 }
 
 function makeStep(kind, label, integrationId = "", suffix = "") {
@@ -565,6 +986,7 @@ function applyTemplate(flow, templateId, config = null) {
     model: defaults.model || flowModel || stepModel || "",
     text_model: defaults.text_model || flow.text_model || "",
     voice: defaults.voice || flowVoice || stepVoice || "",
+    language: flow.language || "en",
     steps,
     conversation_flow:
       template.mode === "composed"
@@ -636,7 +1058,7 @@ function syncFlow(flow, config = null) {
       ? { ...(flow.conversation_flow || clone(defaultFlow.conversation_flow)), enabled: false }
       : flow.conversation_flow,
     mcp_enabled: hasTools,
-    language: flow.language || null,
+    language: flow.language || "en",
     max_output_tokens: flow.max_output_tokens ? Number(flow.max_output_tokens) : null,
     reasoning_effort: flow.reasoning_effort || null,
     mcp_tool_allowlist: Array.isArray(flow.mcp_tool_allowlist)
@@ -1677,7 +2099,7 @@ function OldPipelineView({
             <input value={flow.text_model || ""} onChange={(event) => updateFlow((draft) => ({ ...draft, text_model: event.target.value }))} />
           </Field>
           <Field label="Language">
-            <input value={flow.language || ""} onChange={(event) => updateFlow((draft) => ({ ...draft, language: event.target.value }))} />
+            <input value={flow.language || "en"} onChange={(event) => updateFlow((draft) => ({ ...draft, language: event.target.value || "en" }))} />
           </Field>
           <Field label="Noise reduction">
             <select value={flow.noise_reduction} onChange={(event) => updateFlow((draft) => ({ ...draft, noise_reduction: event.target.value }))}>
@@ -1942,7 +2364,7 @@ function PipelineView({
               <strong>{flowSupported ? "Pipecat Flow editor" : "Unavailable"}</strong>
               <span>
                 {flowSupported
-                  ? "Open the official Pipecat Flows Editor and sync JSON back to this pipeline."
+                  ? "Open the visual Pipecat Flow composer for this pipeline."
                   : "Official Pipecat Flows are not available for speech-to-speech models."}
               </span>
               <Button icon={Workflow} onClick={() => setPipelineStage("flow")} disabled={!flowSupported}>
@@ -2008,7 +2430,7 @@ function PipelineView({
         <div className="divider" />
         <div className="form-grid">
           <Field label="Language">
-            <input value={flow.language || ""} onChange={(event) => updateFlow((draft) => ({ ...draft, language: event.target.value }))} />
+            <input value={flow.language || "en"} onChange={(event) => updateFlow((draft) => ({ ...draft, language: event.target.value || "en" }))} />
           </Field>
           <Field label="Noise reduction">
             <select value={flow.noise_reduction} onChange={(event) => updateFlow((draft) => ({ ...draft, noise_reduction: event.target.value }))}>
@@ -2128,64 +2550,467 @@ function DropSlot({ index, insertStep }) {
 }
 
 function OfficialFlowComposer({ flow, updateFlow }) {
-  const initialJson = JSON.stringify(flow.conversation_flow || defaultFlow.conversation_flow, null, 2);
-  const [draftJson, setDraftJson] = useState(initialJson);
-  const [error, setError] = useState("");
+  const [editorFlow, setEditorFlow] = useState(() => normalizeEditorFlow(flow.conversation_flow, flow.name));
+  const [selectedNodeId, setSelectedNodeId] = useState("");
+  const [exampleQuery, setExampleQuery] = useState("");
+  const [exampleId, setExampleId] = useState("home_pizza_mcp");
+  const dragRef = useRef(null);
+  const enabled = Boolean(flow.conversation_flow?.enabled);
 
   useEffect(() => {
-    setDraftJson(JSON.stringify(flow.conversation_flow || defaultFlow.conversation_flow, null, 2));
-    setError("");
-  }, [flow.id, flow.conversation_flow]);
+    const next = normalizeEditorFlow(flow.conversation_flow, flow.name);
+    setEditorFlow(next);
+    setSelectedNodeId(next.nodes.find((node) => node.type === "initial")?.id || next.nodes[0]?.id || "");
+  }, [flow.id]);
 
-  function applyJson(value = draftJson) {
-    const parsed = safeJson(value, null);
-    if (!parsed || !Array.isArray(parsed.nodes)) {
-      setError("JSON must contain a Pipecat Flows nodes array.");
-      return;
-    }
+  const nodes = editorFlow.nodes || [];
+  const edges = deriveFlowEdges(nodes);
+  const selectedNode = nodes.find((node) => node.id === selectedNodeId) || nodes[0];
+  const canvasSize = {
+    width: Math.max(960, ...nodes.map((node) => (node.position?.x || 0) + 280)),
+    height: Math.max(520, ...nodes.map((node) => (node.position?.y || 0) + 190)),
+  };
+  const filteredExamples = flowExampleTemplates.filter((item) => {
+    const query = exampleQuery.trim().toLowerCase();
+    if (!query) return true;
+    return `${item.name} ${item.description}`.toLowerCase().includes(query);
+  });
+
+  function commit(nextFlow, nextEnabled = enabled) {
+    const normalized = normalizeEditorFlow(nextFlow, flow.name);
+    setEditorFlow(normalized);
     updateFlow((current) => ({
       ...current,
-      conversation_flow: {
-        ...parsed,
-        enabled: true,
-      },
+      conversation_flow: editorFlowToConversationFlow(normalized, nextEnabled),
     }));
-    setError("");
   }
 
-  function loadPizzaExample() {
-    const value = JSON.stringify(pizzaConversationFlow, null, 2);
-    setDraftJson(value);
-    applyJson(value);
+  function updateNode(nodeId, updater) {
+    commit({
+      ...editorFlow,
+      nodes: nodes.map((node) => (node.id === nodeId ? updater(clone(node)) : node)),
+    });
+  }
+
+  function updateSelectedData(updater) {
+    if (!selectedNode) return;
+    updateNode(selectedNode.id, (node) => {
+      node.data = updater({ ...(node.data || {}) });
+      return node;
+    });
+  }
+
+  function updateFunction(index, updater) {
+    updateSelectedData((data) => {
+      const functions = Array.isArray(data.functions) ? clone(data.functions) : [];
+      functions[index] = updater(functions[index] || {});
+      return { ...data, functions };
+    });
+  }
+
+  function addFunction() {
+    updateSelectedData((data) => {
+      const functions = Array.isArray(data.functions) ? clone(data.functions) : [];
+      functions.push({
+        name: `next_${functions.length + 1}`,
+        description: "Continue to the selected node",
+        properties: {},
+        required: [],
+        next_node_id: nodes.find((node) => node.id !== selectedNode?.id)?.id || "",
+      });
+      return { ...data, functions };
+    });
+  }
+
+  function removeFunction(index) {
+    updateSelectedData((data) => ({
+      ...data,
+      functions: (Array.isArray(data.functions) ? data.functions : []).filter((_, itemIndex) => itemIndex !== index),
+    }));
+  }
+
+  function addNode(type = "node") {
+    const label = type === "end" ? "End" : type === "initial" ? "Initial" : "Node";
+    const id = makeFlowNodeId(label, nodes);
+    const node = {
+      id,
+      type,
+      position: { x: 120 + nodes.length * 70, y: 120 + nodes.length * 36 },
+      data: {
+        label,
+        role_messages: type === "initial" ? textToMessages(flow.instructions || defaultFlow.instructions) : [],
+        task_messages: textToMessages(type === "end" ? "Confirm the result and end the conversation." : "Continue the conversation."),
+        functions: [],
+        post_actions: type === "end" ? [{ type: "end_conversation" }] : undefined,
+        respond_immediately: type !== "end",
+      },
+    };
+    commit({ ...editorFlow, nodes: [...nodes, node] });
+    setSelectedNodeId(id);
+  }
+
+  function removeNode(nodeId) {
+    const nextNodes = nodes
+      .filter((node) => node.id !== nodeId)
+      .map((node) => ({
+        ...node,
+        data: {
+          ...(node.data || {}),
+          functions: (node.data?.functions || []).map((fn) =>
+            fn.next_node_id === nodeId ? { ...fn, next_node_id: "" } : fn,
+          ),
+        },
+      }));
+    commit({ ...editorFlow, nodes: nextNodes });
+    setSelectedNodeId(nextNodes[0]?.id || "");
+  }
+
+  function setNodeType(type) {
+    if (!selectedNode) return;
+    updateNode(selectedNode.id, (node) => {
+      node.type = type;
+      const data = { ...(node.data || {}) };
+      if (type === "end") {
+        data.post_actions = [{ type: "end_conversation" }];
+        data.functions = [];
+      } else {
+        data.post_actions = (data.post_actions || []).filter((action) => action.type !== "end_conversation");
+      }
+      if (type === "initial" && !messagesToText(data.role_messages)) {
+        data.role_messages = textToMessages(flow.instructions || defaultFlow.instructions);
+      }
+      node.data = data;
+      return node;
+    });
+  }
+
+  function loadExample() {
+    const item = flowExampleTemplates.find((example) => example.id === exampleId) || flowExampleTemplates[0];
+    const next = item.flow ? normalizeEditorFlow(item.flow, item.name) : createPassThroughEditorFlow(flow);
+    commit(next, item.id !== "passthrough");
+    setSelectedNodeId(next.nodes.find((node) => node.type === "initial")?.id || next.nodes[0]?.id || "");
+  }
+
+  function toggleEnabled(value) {
+    updateFlow((current) => ({
+      ...current,
+      conversation_flow: editorFlowToConversationFlow(editorFlow, value),
+    }));
+  }
+
+  function updateNodePosition(nodeId, position) {
+    const next = {
+      ...editorFlow,
+      nodes: nodes.map((node) => (node.id === nodeId ? { ...node, position } : node)),
+    };
+    setEditorFlow(next);
+    updateFlow((current) => ({
+      ...current,
+      conversation_flow: editorFlowToConversationFlow(next, enabled),
+    }));
+  }
+
+  function startDrag(event, node) {
+    if (event.button !== 0) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = {
+      nodeId: node.id,
+      startX: event.clientX,
+      startY: event.clientY,
+      position: { ...(node.position || { x: 0, y: 0 }) },
+    };
+    setSelectedNodeId(node.id);
+  }
+
+  function moveDrag(event, node) {
+    const drag = dragRef.current;
+    if (!drag || drag.nodeId !== node.id) return;
+    event.preventDefault();
+    updateNodePosition(node.id, {
+      x: Math.max(20, drag.position.x + event.clientX - drag.startX),
+      y: Math.max(20, drag.position.y + event.clientY - drag.startY),
+    });
+  }
+
+  function stopDrag(event) {
+    if (dragRef.current) {
+      try {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      } catch {
+        // Pointer capture may already be released by the browser.
+      }
+    }
+    dragRef.current = null;
+  }
+
+  function editProperty(functionIndex, oldName, nextName, updater = (value) => value) {
+    updateFunction(functionIndex, (fn) => {
+      const properties = { ...(fn.properties || {}) };
+      const current = properties[oldName] || { type: "string", description: "" };
+      delete properties[oldName];
+      const key = slugify(nextName || oldName).replace(/-/g, "_") || oldName;
+      properties[key] = updater(current);
+      const required = (fn.required || []).map((item) => (item === oldName ? key : item));
+      return { ...fn, properties, required };
+    });
+  }
+
+  function removeProperty(functionIndex, propertyName) {
+    updateFunction(functionIndex, (fn) => {
+      const properties = { ...(fn.properties || {}) };
+      delete properties[propertyName];
+      return {
+        ...fn,
+        properties,
+        required: (fn.required || []).filter((item) => item !== propertyName),
+      };
+    });
+  }
+
+  function addProperty(functionIndex) {
+    updateFunction(functionIndex, (fn) => {
+      const properties = { ...(fn.properties || {}) };
+      const key = makeFlowNodeId("property", Object.keys(properties).map((id) => ({ id }))).replace(/-/g, "_");
+      properties[key] = { type: "string", description: "" };
+      return { ...fn, properties };
+    });
   }
 
   return (
     <div className="official-flow-composer">
-      <div className="flow-frame">
-        <iframe title="Pipecat Flows Editor" src="https://flows.pipecat.ai/" />
+      <div className="flow-toolbar">
+        <Toggle checked={enabled} onChange={toggleEnabled} label={enabled ? "Flow enabled" : "Pass-through"} />
+        <div className="example-picker">
+          <input
+            value={exampleQuery}
+            onChange={(event) => setExampleQuery(event.target.value)}
+            placeholder="Filter examples"
+            aria-label="Filter flow examples"
+          />
+          <select value={exampleId} onChange={(event) => setExampleId(event.target.value)}>
+            {filteredExamples.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+          <Button icon={Download} variant="secondary" onClick={loadExample}>
+            Load example
+          </Button>
+        </div>
       </div>
-      <div className="flow-sync-panel">
-        <div className="section-title">
-          <strong>Flow JSON</strong>
-          <span>{flow.conversation_flow?.enabled ? "enabled" : "pass-through"}</span>
+
+      <div className="flow-designer">
+        <div className="flow-canvas-wrap">
+          <div className="flow-canvas-inner" style={{ width: canvasSize.width, height: canvasSize.height }}>
+            <svg className="flow-edges" width={canvasSize.width} height={canvasSize.height}>
+              <defs>
+                <marker id="flow-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                  <path d="M 0 0 L 10 5 L 0 10 z" />
+                </marker>
+              </defs>
+              {edges.map((edge) => {
+                const source = nodes.find((node) => node.id === edge.source);
+                const target = nodes.find((node) => node.id === edge.target);
+                if (!source || !target) return null;
+                const x1 = (source.position?.x || 0) + 210;
+                const y1 = (source.position?.y || 0) + 58;
+                const x2 = target.position?.x || 0;
+                const y2 = (target.position?.y || 0) + 58;
+                const midX = (x1 + x2) / 2;
+                const midY = (y1 + y2) / 2 - 8;
+                return (
+                  <g key={edge.id}>
+                    <path d={`M ${x1} ${y1} C ${x1 + 80} ${y1}, ${x2 - 80} ${y2}, ${x2} ${y2}`} />
+                    <text x={midX} y={midY}>
+                      {edge.label}
+                    </text>
+                  </g>
+                );
+              })}
+            </svg>
+            {nodes.map((node) => {
+              const nodeType = deriveEditorNodeType(node);
+              return (
+                <button
+                  key={node.id}
+                  type="button"
+                  className={`flow-canvas-node ${nodeType} ${selectedNode?.id === node.id ? "selected" : ""}`}
+                  style={{ left: node.position?.x || 0, top: node.position?.y || 0 }}
+                  onPointerDown={(event) => startDrag(event, node)}
+                  onPointerMove={(event) => moveDrag(event, node)}
+                  onPointerUp={stopDrag}
+                  onPointerCancel={stopDrag}
+                  onClick={() => setSelectedNodeId(node.id)}
+                >
+                  <span>{nodeType}</span>
+                  <strong>{node.data?.label || node.id}</strong>
+                  <small>{(node.data?.functions || []).length} functions</small>
+                </button>
+              );
+            })}
+          </div>
         </div>
-        <p className="field-help">
-          The embedded editor is the official Pipecat Flows Editor. Export JSON there, paste it here, and apply it to
-          this pipeline.
-        </p>
-        <textarea rows={12} value={draftJson} onChange={(event) => setDraftJson(event.target.value)} />
-        {error && <div className="validation-card error">{error}</div>}
-        <div className="button-row">
-          <Button icon={ExternalLink} variant="secondary" onClick={() => window.open("https://flows.pipecat.ai/", "_blank", "noopener")}>
-            Open editor
-          </Button>
-          <Button icon={Workflow} variant="secondary" onClick={loadPizzaExample}>
-            Load pizza example
-          </Button>
-          <Button icon={Save} onClick={() => applyJson()}>
-            Apply JSON
-          </Button>
-        </div>
+
+        <aside className="flow-inspector">
+          <div className="section-title">
+            <strong>Pipecat Flow</strong>
+            <span>{nodes.length} nodes</span>
+          </div>
+          <div className="flow-node-palette">
+            <Button icon={Plus} variant="secondary" onClick={() => addNode("node")}>
+              Node
+            </Button>
+            <Button icon={Plus} variant="secondary" onClick={() => addNode("initial")} disabled={nodes.some((node) => node.type === "initial")}>
+              Initial
+            </Button>
+            <Button icon={Plus} variant="secondary" onClick={() => addNode("end")}>
+              End
+            </Button>
+          </div>
+
+          {selectedNode ? (
+            <div className="flow-node-form">
+              <Field label="Node label">
+                <input
+                  value={selectedNode.data?.label || ""}
+                  onChange={(event) => updateSelectedData((data) => ({ ...data, label: event.target.value }))}
+                />
+              </Field>
+              <Field label="Type">
+                <select value={selectedNode.type} onChange={(event) => setNodeType(event.target.value)}>
+                  <option value="initial">Initial</option>
+                  <option value="node">Node</option>
+                  <option value="end">End</option>
+                </select>
+              </Field>
+              <Field label="Role messages" wide>
+                <textarea
+                  rows={4}
+                  value={messagesToText(selectedNode.data?.role_messages)}
+                  onChange={(event) => updateSelectedData((data) => ({ ...data, role_messages: textToMessages(event.target.value) }))}
+                />
+              </Field>
+              <Field label="Task messages" wide>
+                <textarea
+                  rows={4}
+                  value={messagesToText(selectedNode.data?.task_messages)}
+                  onChange={(event) => updateSelectedData((data) => ({ ...data, task_messages: textToMessages(event.target.value) }))}
+                />
+              </Field>
+              {selectedNode.type !== "end" && (
+                <Toggle
+                  checked={selectedNode.data?.respond_immediately !== false}
+                  onChange={(value) => updateSelectedData((data) => ({ ...data, respond_immediately: value }))}
+                  label="Respond immediately"
+                />
+              )}
+
+              {selectedNode.type !== "end" && (
+                <>
+                  <div className="section-title">
+                    <strong>Functions</strong>
+                    <span>{(selectedNode.data?.functions || []).length}</span>
+                  </div>
+                  {(selectedNode.data?.functions || []).map((fn, index) => (
+                    <div className="function-row flow-function-row" key={`${selectedNode.id}-${index}`}>
+                      <Field label="Name">
+                        <input
+                          value={fn.name || ""}
+                          onChange={(event) => updateFunction(index, (item) => ({ ...item, name: event.target.value }))}
+                        />
+                      </Field>
+                      <Field label="Description">
+                        <input
+                          value={fn.description || ""}
+                          onChange={(event) => updateFunction(index, (item) => ({ ...item, description: event.target.value }))}
+                        />
+                      </Field>
+                      <Field label="Next node">
+                        <select value={fn.next_node_id || ""} onChange={(event) => updateFunction(index, (item) => ({ ...item, next_node_id: event.target.value }))}>
+                          <option value="">Stay here</option>
+                          {nodes.map((node) => (
+                            <option key={node.id} value={node.id}>
+                              {node.data?.label || node.id}
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field label="MCP tool">
+                        <input
+                          value={fn.mcp_tool || ""}
+                          placeholder="Optional HA MCP tool"
+                          onChange={(event) => updateFunction(index, (item) => ({ ...item, mcp_tool: event.target.value }))}
+                        />
+                      </Field>
+                      <Field label="Required properties" wide>
+                        <input
+                          value={(fn.required || []).join(", ")}
+                          placeholder="size, toppings"
+                          onChange={(event) =>
+                            updateFunction(index, (item) => ({
+                              ...item,
+                              required: event.target.value
+                                .split(",")
+                                .map((part) => part.trim())
+                                .filter(Boolean),
+                            }))
+                          }
+                        />
+                      </Field>
+                      <div className="flow-properties">
+                        <div className="section-title">
+                          <strong>Properties</strong>
+                          <Button icon={Plus} variant="ghost" title="Add property" onClick={() => addProperty(index)} />
+                        </div>
+                        {Object.entries(fn.properties || {}).map(([propertyName, property]) => (
+                          <div className="flow-property-row" key={propertyName}>
+                            <input value={propertyName} onChange={(event) => editProperty(index, propertyName, event.target.value)} />
+                            <select
+                              value={property.type || "string"}
+                              onChange={(event) =>
+                                editProperty(index, propertyName, propertyName, (current) => ({ ...current, type: event.target.value }))
+                              }
+                            >
+                              <option value="string">string</option>
+                              <option value="integer">integer</option>
+                              <option value="number">number</option>
+                              <option value="boolean">boolean</option>
+                              <option value="array">array</option>
+                            </select>
+                            <input
+                              value={property.description || ""}
+                              placeholder="Description"
+                              onChange={(event) =>
+                                editProperty(index, propertyName, propertyName, (current) => ({
+                                  ...current,
+                                  description: event.target.value,
+                                }))
+                              }
+                            />
+                            <Button icon={X} variant="ghost" title="Remove property" onClick={() => removeProperty(index, propertyName)} />
+                          </div>
+                        ))}
+                      </div>
+                      <Button icon={Trash2} variant="danger" onClick={() => removeFunction(index)}>
+                        Remove function
+                      </Button>
+                    </div>
+                  ))}
+                  <Button icon={Plus} variant="secondary" onClick={addFunction}>
+                    Add function
+                  </Button>
+                </>
+              )}
+
+              <Button icon={Trash2} variant="danger" onClick={() => removeNode(selectedNode.id)} disabled={nodes.length <= 1}>
+                Delete node
+              </Button>
+            </div>
+          ) : (
+            <div className="empty-state">Select a node to edit its Pipecat Flow configuration.</div>
+          )}
+        </aside>
       </div>
     </div>
   );
@@ -3212,7 +4037,7 @@ function VoiceTest({ config, flow }) {
               version: "1.4.0",
               about: {
                 library: "pipecat-assist-ui",
-                library_version: "0.1.20",
+                library_version: "0.1.21",
                 platform: "browser",
               },
             },

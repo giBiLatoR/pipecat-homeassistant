@@ -32,9 +32,10 @@ Pipecat Flow can be added only to composed realtime pipelines; speech-to-speech
 profiles show it as unavailable.
 
 `Pipecat Flow`
-: For composed realtime pipelines, open the nested Flow view to use the official
-[Pipecat Flows Editor](https://flows.pipecat.ai/), paste/export JSON, or load
-the pizza-order example. The default Flow remains pass-through until enabled.
+: For composed realtime pipelines, open the nested Flow view to edit a visual
+Pipecat Flow stored in the same schema as the Pipecat Flows Editor. The view
+includes filtered examples such as Minimal, Food Ordering, and Home Pizza via
+MCP. The default Flow remains pass-through until enabled.
 
 `Integrations`
 : Configure cloud providers and local AI endpoints, including Gemini, OpenAI,

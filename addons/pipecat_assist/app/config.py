@@ -398,7 +398,7 @@ class FlowConfig(BaseModel):
     text_model: str = DEFAULT_GEMINI_TEXT_MODEL
     voice: str = DEFAULT_GEMINI_LIVE_VOICE
     speed: float = Field(default=1.0, ge=0.25, le=1.5)
-    language: str | None = None
+    language: str | None = "en"
     instructions: str = DEFAULT_INSTRUCTIONS
     greeting: str = "Greet the user briefly and wait for their request."
     transcription_model: str = "gpt-realtime-whisper"
@@ -964,6 +964,9 @@ class ConfigStore:
             changed = True
 
         for flow in config.flows:
+            if not flow.language:
+                flow.language = "en"
+                changed = True
             changed = _repair_flow_provider_model(config, flow) or changed
             changed = _strip_unsupported_s2s_flow_steps(config, flow) or changed
         changed = _repair_mcp_url_overrides(config) or changed
