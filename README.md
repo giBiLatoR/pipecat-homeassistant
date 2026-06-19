@@ -55,8 +55,9 @@ flowchart LR
 2. Install **Pipecat Assist**.
 3. Enable Home Assistant's **Model Context Protocol Server** integration.
 4. Start the add-on and open the web UI.
-5. Open **Runtime > Home Assistant**, click **Connect OAuth**, approve access
-   in Home Assistant, then click **Check MCP**.
+5. Open **Runtime > Home Assistant** and click **Check MCP**. In a normal
+   Home Assistant add-on install, Pipecat Assist uses the Supervisor token
+   automatically.
 6. Configure model providers:
    OpenAI, Gemini, Anthropic, Bedrock, Azure/OpenAI-compatible endpoints,
    Ollama, or local runtimes.
@@ -68,9 +69,9 @@ flowchart LR
 For a complete Google Gemini Live setup and Home Assistant Assist test path,
 see [Gemini Live in Home Assistant](docs/gemini-live-home-assistant.md).
 
-Home Assistant MCP access uses Home Assistant's OAuth flow by default. A
-manually pasted Home Assistant long-lived access token remains available in the
-**Runtime** UI as a fallback for installations that cannot complete OAuth.
+Home Assistant MCP access uses the add-on's Supervisor token by default. OAuth
+and manually pasted long-lived access tokens remain available in the
+**Runtime** UI as fallbacks for custom installations.
 
 ## Pipecat ESP32
 

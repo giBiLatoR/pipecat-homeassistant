@@ -1444,7 +1444,7 @@ function voiceReadiness(config, flow) {
   if (flow.mcp_enabled && config.mcp_token_source === "supervisor" && secretStatus(mcp, "token") === "missing") {
     return {
       ok: true,
-      detail: "Ready. MCP will use the Supervisor token; if Check MCP returns 401, connect OAuth.",
+      detail: "Ready. MCP will use the Home Assistant Supervisor token.",
     };
   }
   if (flow.mcp_enabled && !hasMcpOAuth && secretStatus(mcp, "token") === "missing" && !config.longlived_token_configured) {
@@ -1717,7 +1717,9 @@ function RuntimeView({
     ? "OAuth connected"
     : mcp?.token_configured
       ? "configured"
-      : "OAuth recommended";
+      : config.mcp_token_source === "supervisor"
+        ? "Supervisor token"
+        : "optional fallback token";
   return (
     <div className="workspace-grid">
       <section className="panel main-panel">
@@ -1727,7 +1729,7 @@ function RuntimeView({
             <span>{mcpStatusLabel(config, status)}</span>
           </div>
           <div className="button-row">
-            <Button icon={KeyRound} variant="primary" onClick={startMcpOAuth}>
+            <Button icon={KeyRound} variant="secondary" onClick={startMcpOAuth}>
               Connect OAuth
             </Button>
             {hasMcpOAuth && (

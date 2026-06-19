@@ -363,11 +363,11 @@ class RuntimeConfig(BaseModel):
 
         integration = self.mcp_integration
         return (
-            (integration.oauth_access_token if integration else "")
-            or (integration.token if integration else "")
+            (integration.token if integration else "")
             or self.longlived_token
             or os.getenv("LONGLIVED_TOKEN")
             or os.getenv("SUPERVISOR_TOKEN", "")
+            or (integration.oauth_access_token if integration else "")
         )
 
     @property
@@ -387,14 +387,14 @@ class RuntimeConfig(BaseModel):
         """Return where the effective MCP token came from."""
 
         integration = self.mcp_integration
-        if integration and integration.oauth_refresh_token:
-            return "oauth"
         if integration and integration.token:
             return "integration"
         if self.longlived_token or os.getenv("LONGLIVED_TOKEN"):
             return "long-lived"
         if os.getenv("SUPERVISOR_TOKEN"):
             return "supervisor"
+        if integration and integration.oauth_refresh_token:
+            return "oauth"
         return ""
 
     def public_dict(self) -> dict[str, Any]:

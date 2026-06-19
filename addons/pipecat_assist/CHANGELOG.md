@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.12
+
+- Prefer the Home Assistant Supervisor token for MCP access inside the add-on.
+  OAuth is now only a fallback for custom/out-of-Supervisor setups.
+- Updated Runtime copy so OAuth is no longer presented as required when the
+  Supervisor token is available.
+
 ## 0.1.11
 
 - Fixed Home Assistant OAuth token exchange by using the normal Home Assistant

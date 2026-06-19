@@ -107,15 +107,19 @@ async def resolve_mcp_token(store: ConfigStore) -> str:
     """Return a usable MCP token, refreshing OAuth access tokens when needed."""
 
     config = store.load()
+    fallback_token = config.fallback_mcp_token
+    if fallback_token:
+        return fallback_token
+
     integration = config.mcp_integration
     if not integration or not integration.oauth_refresh_token:
-        return config.fallback_mcp_token
+        return ""
 
     if integration.oauth_access_token and integration.oauth_expires_at > time.time() + 90:
         return integration.oauth_access_token
 
     if not integration.oauth_client_id or not integration.oauth_token_url:
-        return config.fallback_mcp_token
+        return ""
 
     payload = await _refresh_oauth_token(integration)
     _save_oauth_payload(

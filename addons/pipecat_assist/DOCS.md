@@ -34,15 +34,15 @@ host and shared satellite secret, and run a browser voice test that connects to
 the selected pipeline through the same SmallWebRTC offer route used by
 satellites.
 
-### Home Assistant MCP OAuth
+### Home Assistant MCP
 
-Open **Runtime > Home Assistant**, select **Connect OAuth**, approve the
-request in Home Assistant, then return to the add-on and select **Check MCP**.
-The add-on stores the returned refresh token in its private configuration and
-refreshes short-lived access tokens automatically before using `/api/mcp`.
+In a normal Home Assistant add-on install, Pipecat Assist uses the Supervisor
+token provided by Home Assistant (`homeassistant_api: true`) to reach
+`/api/mcp`. Open **Runtime > Home Assistant** and select **Check MCP**.
 
-The manual access-token field is kept only as a fallback for environments
-where OAuth cannot complete.
+OAuth and the manual access-token field are kept only as fallbacks for custom
+deployments where the Supervisor token is not available or a custom MCP URL is
+used.
 
 ## Gemini Live
 

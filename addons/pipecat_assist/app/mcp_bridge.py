@@ -71,8 +71,10 @@ class HomeAssistantMCPBridge:
 
         if response.status_code in {401, 403}:
             raise MCPAuthenticationError(
-                "Home Assistant MCP rejected the token. Open Runtime > Home "
-                "Assistant, connect OAuth, save if you changed settings, and retry."
+                "Home Assistant MCP rejected the token. The add-on normally uses "
+                "the Home Assistant Supervisor token automatically. If you are "
+                "running outside the Supervisor or using a custom MCP URL, configure "
+                "a long-lived access token or connect OAuth."
             )
         if response.status_code == 404:
             raise RuntimeError(f"Home Assistant MCP endpoint was not found at {self.url}")
