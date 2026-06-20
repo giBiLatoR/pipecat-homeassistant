@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.32
+
+- Auto-detect the Pipecat Assist add-on through the Home Assistant Supervisor
+  API and prefill the add-on URL in the custom component setup form while
+  keeping the field editable.
+
 ## 0.1.31
 
 - Added authenticated Home Assistant proxy endpoints for the Lovelace card, so

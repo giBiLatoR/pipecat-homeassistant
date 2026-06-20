@@ -156,16 +156,17 @@ WebRTC card.
 1. Copy or install `custom_components/pipecat_assist` into Home Assistant.
 2. Restart Home Assistant if the integration is not already available.
 3. Add **Pipecat Assist** from **Settings > Devices & services**.
-4. Set the add-on URL to `http://127.0.0.1:7860`, or use the Home Assistant LAN
-   URL if Core cannot reach loopback.
-5. Leave the bearer token empty unless you add your own endpoint protection.
-6. In **Settings > Voice assistants**, select **Pipecat Assist** for
+4. Confirm the suggested add-on URL. In Home Assistant OS or Supervised
+   installs, the integration asks Supervisor for the installed add-on and
+   prefills the first reachable URL. Change it only if Core cannot reach the
+   suggested address.
+5. In **Settings > Voice assistants**, select **Pipecat Assist** for
    Conversation, Speech-to-text, and Text-to-speech. Use the only available
    Pipecat Assist language entry; the real language and voice are configured in
    the add-on.
-7. Use a composed pipeline for this bridge. STT currently supports OpenAI Cloud
+6. Use a composed pipeline for this bridge. STT currently supports OpenAI Cloud
    and Deepgram. TTS currently supports OpenAI Cloud and ElevenLabs.
-8. Type or speak a Home Assistant request in Assist and check the add-on logs
+7. Type or speak a Home Assistant request in Assist and check the add-on logs
    for MCP tool calls and model errors.
 
 ### Lovelace WebRTC card
@@ -213,7 +214,6 @@ to the standard Home Assistant token flow as the ESPHome integration work lands.
 ## Home Assistant integration
 
 Copy or install `custom_components/pipecat_assist` from this repository, then
-add the integration in Home Assistant. Set the add-on URL to
-`http://127.0.0.1:7860` or the Home Assistant LAN URL if the integration cannot
-reach loopback in your installation. The integration provides Conversation,
-STT, TTS, and the Lovelace card asset.
+add the integration in Home Assistant. The add-on URL is auto-detected through
+Supervisor when possible and remains editable for custom installations. The
+integration provides Conversation, STT, TTS, and the Lovelace card asset.
