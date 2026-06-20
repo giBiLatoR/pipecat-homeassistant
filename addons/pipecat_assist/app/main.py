@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import base64
 import hmac
+import json
 import os
 import time
 import wave
@@ -13,10 +14,10 @@ from contextlib import suppress
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 from loguru import logger
 from starlette.staticfiles import StaticFiles
@@ -108,6 +109,8 @@ TTS_MEDIA_TYPES = {
 HA_STT_BRIDGE_KINDS = {"deepgram", "gemini", "gemini_cloud", "openai", "openai_cloud"}
 HA_TTS_BRIDGE_KINDS = {"elevenlabs", "gemini", "gemini_cloud", "openai", "openai_cloud"}
 PROVIDER_RETRY_STATUSES = {429, 500, 502, 503, 504}
+TTS_PREFETCH_TTL_SECONDS = 90
+TTS_PREFETCH: dict[tuple[str, str, str], tuple[float, Any]] = {}
 
 app.mount("/assets", StaticFiles(directory=UI_DIR), name="assets")
 
@@ -161,8 +164,18 @@ def _audio_for_cloud_stt(request: Request, audio: bytes) -> tuple[bytes, str]:
     advertising WAV/PCM metadata. Cloud HTTP STT APIs expect a real WAV file.
     """
 
-    metadata = _parse_speech_content(request.headers.get("x-speech-content", ""))
     content_type = request.headers.get("content-type") or "audio/wav"
+    metadata = _parse_speech_content(request.headers.get("x-speech-content", ""))
+    return _audio_for_cloud_stt_metadata(audio, metadata, content_type)
+
+
+def _audio_for_cloud_stt_metadata(
+    audio: bytes,
+    metadata: dict[str, Any],
+    content_type: str = "audio/wav",
+) -> tuple[bytes, str]:
+    """Return a valid upload payload using parsed Home Assistant speech metadata."""
+
     audio_format = metadata.get("format", "wav").lower()
     codec = metadata.get("codec", "pcm").lower()
     if audio_format == "wav" and codec == "pcm" and not audio.startswith(b"RIFF"):
@@ -177,6 +190,26 @@ def _audio_for_cloud_stt(request: Request, audio: bytes) -> tuple[bytes, str]:
             channels=channels,
         ), "audio/wav"
     return audio, content_type
+
+
+def _pcm_stream_payload(chunk: bytes) -> bytes:
+    """Return raw PCM payload, stripping a WAV header when a streamed chunk has one."""
+
+    if chunk.startswith(b"RIFF"):
+        data_index = chunk.find(b"data")
+        if data_index >= 0 and len(chunk) >= data_index + 8:
+            return chunk[data_index + 8 :]
+    return chunk
+
+
+def _ws_metadata_value(metadata: dict[str, Any], key: str, default: Any) -> Any:
+    value = metadata.get(key)
+    return default if value in {None, ""} else value
+
+
+def _stt_metadata_from_start(start: dict[str, Any]) -> dict[str, Any]:
+    metadata = start.get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
 
 
 def _preferred_tts_format(payload: dict[str, Any]) -> str:
@@ -583,43 +616,57 @@ async def api_conversation(payload: dict[str, Any]):
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
     config = STORE.load()
+    flow = config.selected_flow(payload.get("flow_id"))
     async def request():
-        return await run_text_conversation(
+        result = await run_text_conversation(
             config,
             text=text,
             language=payload.get("language"),
             conversation_id=payload.get("conversation_id"),
-            flow_id=payload.get("flow_id"),
+            flow_id=flow.id,
             mcp_token=config.effective_mcp_token,
         )
+        if not result.get("error"):
+            _start_tts_prefetch(
+                config=config,
+                flow=flow,
+                text=str(result.get("speech") or ""),
+                language=payload.get("language"),
+            )
+        return result
 
     return await _provider_call("HA Assist conversation", request, attempts=1)
 
 
-@app.post("/api/assist/stt")
-async def api_stt(request: Request, flow_id: str | None = None):
-    """Best-effort STT bridge for the classic Home Assistant Assist pipeline."""
-
-    config = STORE.load()
-    flow = config.selected_flow(flow_id)
+async def _transcribe_audio_bytes(
+    *,
+    config: RuntimeConfig,
+    flow: FlowConfig,
+    audio: bytes,
+    metadata: dict[str, Any],
+    content_type: str,
+) -> dict[str, str]:
     step, integration = _ha_assist_step_integration(config, flow, "stt", HA_STT_BRIDGE_KINDS)
     if not integration:
         raise _bridge_unavailable("STT", "Google Gemini, OpenAI Cloud, OpenAI Realtime, or Deepgram")
     integration = _require_integration(integration, "STT", fields=())
     model = _step_model_for(step, integration, "stt", DEFAULT_OPENAI_STT_MODEL)
-    audio = await request.body()
     if not audio:
         raise HTTPException(status_code=400, detail="No audio was provided")
-    stt_audio, stt_content_type = _audio_for_cloud_stt(request, audio)
+    stt_audio, stt_content_type = _audio_for_cloud_stt_metadata(audio, metadata, content_type)
 
     if integration.kind in {"openai", "openai_cloud"}:
         from openai import AsyncOpenAI
 
         client = AsyncOpenAI(api_key=_integration_api_key_or_400(integration, "STT", config.openai_api_key))
+        openai_stt_model = model or DEFAULT_OPENAI_STT_MODEL
+        if "realtime" in openai_stt_model:
+            openai_stt_model = DEFAULT_OPENAI_STT_MODEL
+
         async def request_openai_stt():
             return await client.audio.transcriptions.create(
                 file=("speech.wav", BytesIO(stt_audio), stt_content_type),
-                model=model or DEFAULT_OPENAI_STT_MODEL,
+                model=openai_stt_model,
                 language=_runtime_language(flow, integration) or None,
             )
 
@@ -688,16 +735,156 @@ async def api_stt(request: Request, flow_id: str | None = None):
     )
 
 
-@app.post("/api/assist/tts")
-async def api_tts(payload: dict[str, Any]):
-    """Best-effort TTS bridge for the classic Home Assistant Assist pipeline."""
+@app.post("/api/assist/stt")
+async def api_stt(request: Request, flow_id: str | None = None):
+    """Best-effort STT bridge for the classic Home Assistant Assist pipeline."""
 
     config = STORE.load()
-    flow = config.selected_flow(payload.get("flow_id"))
-    text = str(payload.get("text") or "").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="No text was provided")
+    flow = config.selected_flow(flow_id)
+    metadata = _parse_speech_content(request.headers.get("x-speech-content", ""))
+    content_type = request.headers.get("content-type") or "audio/wav"
+    return await _transcribe_audio_bytes(
+        config=config,
+        flow=flow,
+        audio=await request.body(),
+        metadata=metadata,
+        content_type=content_type,
+    )
 
+
+@app.websocket("/api/assist/stt/stream")
+async def api_stt_stream(websocket: WebSocket):
+    """Streaming STT bridge for the classic Home Assistant Assist pipeline."""
+
+    await websocket.accept()
+    provider_task: asyncio.Task[str] | None = None
+    provider_queue: asyncio.Queue[bytes | None] | None = None
+    chunks: list[bytes] = []
+    metadata: dict[str, Any] = {}
+    content_type = "audio/wav"
+    config = STORE.load()
+    flow = config.selected_flow(None)
+
+    try:
+        start = await websocket.receive_json()
+        if not isinstance(start, dict) or start.get("type") != "start":
+            await websocket.send_json({"type": "error", "detail": "Expected start message"})
+            await websocket.close(code=1003)
+            return
+
+        flow = config.selected_flow(start.get("flow_id"))
+        metadata = _stt_metadata_from_start(start)
+        content_type = str(start.get("content_type") or "audio/wav")
+        step, integration = _ha_assist_step_integration(config, flow, "stt", HA_STT_BRIDGE_KINDS)
+        if not integration:
+            raise _bridge_unavailable("STT", "Google Gemini, OpenAI Cloud, OpenAI Realtime, or Deepgram")
+        integration = _require_integration(integration, "STT", fields=())
+        model = _step_model_for(step, integration, "stt", DEFAULT_OPENAI_STT_MODEL)
+
+        if _streaming_stt_kind(integration, model):
+            provider_queue = asyncio.Queue(maxsize=32)
+            provider_task = asyncio.create_task(
+                _streaming_transcribe_audio(
+                    websocket=websocket,
+                    queue=provider_queue,
+                    config=config,
+                    flow=flow,
+                    step=step,
+                    integration=integration,
+                    model=model,
+                    metadata=metadata,
+                )
+            )
+            await websocket.send_json({"type": "ready", "mode": "streaming", "provider": integration.kind})
+        else:
+            await websocket.send_json({"type": "ready", "mode": "buffered", "provider": integration.kind})
+
+        while True:
+            message = await websocket.receive()
+            message_type = message.get("type")
+            if message_type == "websocket.disconnect":
+                raise WebSocketDisconnect()
+            if data := message.get("bytes"):
+                chunks.append(data)
+                if provider_queue and provider_task and not provider_task.done():
+                    await provider_queue.put(data)
+                continue
+            raw_text = message.get("text")
+            if not raw_text:
+                continue
+            try:
+                event = json.loads(raw_text)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "end":
+                break
+
+        if provider_queue and provider_task and not provider_task.done():
+            await provider_queue.put(None)
+
+        transcript = ""
+        if provider_task:
+            try:
+                transcript = await provider_task
+            except Exception as err:
+                logger.warning(
+                    "Streaming STT failed for flow {}; falling back to buffered STT: {}",
+                    flow.id,
+                    err,
+                )
+                transcript = ""
+
+        if not transcript:
+            result = await _transcribe_audio_bytes(
+                config=config,
+                flow=flow,
+                audio=b"".join(chunks),
+                metadata=metadata,
+                content_type=content_type,
+            )
+            transcript = result.get("text", "")
+
+        await websocket.send_json({"type": "final", "text": transcript.strip()})
+        await websocket.close()
+    except WebSocketDisconnect:
+        if provider_queue:
+            with suppress(Exception):
+                await provider_queue.put(None)
+        if provider_task:
+            provider_task.cancel()
+    except HTTPException as err:
+        await _send_ws_json(websocket, {"type": "error", "detail": err.detail})
+        with suppress(Exception):
+            await websocket.close(code=1011)
+    except Exception as err:
+        logger.exception("HA Assist streaming STT failed: {}", err)
+        await _send_ws_json(websocket, {"type": "error", "detail": str(err)})
+        with suppress(Exception):
+            await websocket.close(code=1011)
+
+
+def _tts_prefetch_key(flow_id: str, text: str, response_format: str) -> tuple[str, str, str]:
+    return (flow_id, response_format, text.strip())
+
+
+def _prune_tts_prefetch() -> None:
+    now = time.time()
+    stale = [
+        key
+        for key, (created_at, task) in TTS_PREFETCH.items()
+        if now - created_at > TTS_PREFETCH_TTL_SECONDS or task.cancelled()
+    ]
+    for key in stale:
+        TTS_PREFETCH.pop(key, None)
+
+
+async def _synthesize_tts_audio(
+    *,
+    config: RuntimeConfig,
+    flow: FlowConfig,
+    text: str,
+    payload: dict[str, Any],
+) -> tuple[bytes, str, str]:
     step, integration = _ha_assist_step_integration(config, flow, "tts", HA_TTS_BRIDGE_KINDS)
     if not integration:
         raise _bridge_unavailable("TTS", "Google Gemini, OpenAI Cloud, OpenAI Realtime, or ElevenLabs")
@@ -720,11 +907,7 @@ async def api_tts(payload: dict[str, Any]):
             )
 
         result = await _provider_call(f"{integration.name} TTS", request_openai_tts)
-        return Response(
-            content=result.content,
-            media_type=TTS_MEDIA_TYPES.get(response_format, "audio/mpeg"),
-            headers={"X-Audio-Extension": response_format},
-        )
+        return result.content, TTS_MEDIA_TYPES.get(response_format, "audio/mpeg"), response_format
 
     if integration.kind in {"gemini", "gemini_cloud"}:
         api_key = _integration_api_key_or_400(integration, "TTS", os.getenv("GOOGLE_API_KEY", ""))
@@ -746,7 +929,7 @@ async def api_tts(payload: dict[str, Any]):
             },
         )
         audio, media_type, extension = _normalize_inline_audio(*_gemini_inline_audio(data))
-        return Response(content=audio, media_type=media_type, headers={"X-Audio-Extension": extension})
+        return audio, media_type, extension
 
     if integration.kind == "elevenlabs":
         url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice or DEFAULT_ELEVENLABS_VOICE}"
@@ -766,12 +949,77 @@ async def api_tts(payload: dict[str, Any]):
                 return response
 
         response = await _provider_call("ElevenLabs TTS", request_elevenlabs_tts)
-        return Response(content=response.content, media_type="audio/mpeg", headers={"X-Audio-Extension": "mp3"})
+        return response.content, "audio/mpeg", "mp3"
 
     raise HTTPException(
         status_code=400,
         detail=f"HA Assist TTS bridge does not support {integration.name}. Use Gemini, OpenAI Cloud, OpenAI Realtime, or ElevenLabs TTS.",
     )
+
+
+def _start_tts_prefetch(
+    *,
+    config: RuntimeConfig,
+    flow: FlowConfig,
+    text: str,
+    language: str | None,
+) -> None:
+    text = text.strip()
+    if not text:
+        return
+    _prune_tts_prefetch()
+    payload = {
+        "text": text,
+        "language": language or flow.language or "en",
+        "options": {"preferred_format": "mp3"},
+        "flow_id": flow.id,
+    }
+    key = _tts_prefetch_key(flow.id, text, "mp3")
+    if key in TTS_PREFETCH:
+        return
+
+    async def runner() -> tuple[bytes, str, str]:
+        return await _synthesize_tts_audio(config=config, flow=flow, text=text, payload=payload)
+
+    task = asyncio.create_task(runner())
+    task.add_done_callback(lambda item: item.exception() if not item.cancelled() else None)
+    TTS_PREFETCH[key] = (time.time(), task)
+
+
+@app.post("/api/assist/tts")
+async def api_tts(payload: dict[str, Any]):
+    """Best-effort TTS bridge for the classic Home Assistant Assist pipeline."""
+
+    config = STORE.load()
+    flow = config.selected_flow(payload.get("flow_id"))
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="No text was provided")
+
+    response_format = _preferred_tts_format(payload)
+    key = _tts_prefetch_key(flow.id, text, response_format)
+    _prune_tts_prefetch()
+    cached = TTS_PREFETCH.pop(key, None)
+    if cached:
+        _, task = cached
+        try:
+            audio, media_type, extension = await task
+        except Exception as err:
+            logger.debug("Prefetched TTS failed; synthesizing on demand: {}", err)
+            audio, media_type, extension = await _synthesize_tts_audio(
+                config=config,
+                flow=flow,
+                text=text,
+                payload=payload,
+            )
+    else:
+        audio, media_type, extension = await _synthesize_tts_audio(
+            config=config,
+            flow=flow,
+            text=text,
+            payload=payload,
+        )
+    return Response(content=audio, media_type=media_type, headers={"X-Audio-Extension": extension})
 
 
 @app.get("/api/assist/debug/audio")
@@ -954,6 +1202,229 @@ def _bridge_unavailable(role: str, supported_names: str) -> HTTPException:
             "such as Gemini Live do not expose separate STT/TTS steps to classic HA Assist."
         ),
     )
+
+
+def _streaming_stt_kind(integration: IntegrationConfig | None, model: str) -> str:
+    if not integration:
+        return ""
+    if integration.kind == "deepgram":
+        return "deepgram"
+    if integration.kind in {"openai", "openai_cloud"}:
+        if "realtime" in (model or "") or "realtime" in (integration.default_stt_model or ""):
+            return "openai_realtime"
+        return "openai_realtime"
+    return ""
+
+
+def _openai_realtime_transcription_model(flow: FlowConfig, model: str) -> str:
+    for candidate in (model, flow.transcription_model, "gpt-realtime-whisper"):
+        candidate = (candidate or "").strip()
+        if candidate and "realtime" in candidate:
+            return candidate
+    return "gpt-realtime-whisper"
+
+
+def _normalize_language_hint(language: str | None) -> str:
+    value = (language or "").strip()
+    if not value or value.lower() == "pipecat-assist":
+        return ""
+    return value.split("-")[0].lower()
+
+
+def _websocket_connect(url: str, headers: dict[str, str]):
+    import inspect
+    import websockets
+
+    header_key = (
+        "additional_headers"
+        if "additional_headers" in inspect.signature(websockets.connect).parameters
+        else "extra_headers"
+    )
+    return websockets.connect(url, **{header_key: headers})
+
+
+async def _send_ws_json(websocket: WebSocket, payload: dict[str, Any]) -> None:
+    with suppress(Exception):
+        await websocket.send_json(payload)
+
+
+async def _openai_realtime_transcribe_stream(
+    *,
+    websocket: WebSocket,
+    queue: "asyncio.Queue[bytes | None]",
+    config: RuntimeConfig,
+    flow: FlowConfig,
+    integration: IntegrationConfig,
+    model: str,
+    metadata: dict[str, Any],
+) -> str:
+    api_key = _integration_api_key(integration, "STT", config.openai_api_key)
+    sample_rate = int(_ws_metadata_value(metadata, "sample_rate", 24000) or 24000)
+    language = _normalize_language_hint(str(_ws_metadata_value(metadata, "language", "")))
+    transcription_model = _openai_realtime_transcription_model(flow, model)
+    url = f"wss://api.openai.com/v1/realtime?model={quote(transcription_model, safe='')}"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "OpenAI-Beta": "realtime=v1",
+    }
+
+    async with _websocket_connect(url, headers) as provider_ws:
+        session: dict[str, Any] = {
+            "type": "transcription",
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": sample_rate},
+                    "transcription": {"model": transcription_model},
+                }
+            },
+        }
+        if language:
+            session["audio"]["input"]["transcription"]["language"] = language
+        if flow.vad_eagerness:
+            session["audio"]["input"]["transcription"]["delay"] = (
+                "low" if flow.vad_eagerness == "auto" else flow.vad_eagerness
+            )
+        await provider_ws.send(json.dumps({"type": "session.update", "session": session}))
+
+        async def sender() -> None:
+            while True:
+                chunk = await queue.get()
+                if chunk is None:
+                    break
+                payload = _pcm_stream_payload(chunk)
+                if not payload:
+                    continue
+                await provider_ws.send(
+                    json.dumps(
+                        {
+                            "type": "input_audio_buffer.append",
+                            "audio": base64.b64encode(payload).decode("ascii"),
+                        }
+                    )
+                )
+            await provider_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+
+        sender_task = asyncio.create_task(sender())
+        transcript = ""
+        try:
+            async with asyncio.timeout(45):
+                async for raw in provider_ws:
+                    event = json.loads(raw)
+                    event_type = str(event.get("type") or "")
+                    if event_type == "conversation.item.input_audio_transcription.delta":
+                        delta = str(event.get("delta") or "")
+                        if delta:
+                            await _send_ws_json(websocket, {"type": "partial", "text": delta})
+                    elif event_type == "conversation.item.input_audio_transcription.completed":
+                        transcript = str(event.get("transcript") or "").strip()
+                        break
+                    elif event_type == "error":
+                        error = event.get("error") or {}
+                        raise RuntimeError(error.get("message") or "OpenAI realtime transcription failed")
+        finally:
+            sender_task.cancel()
+            with suppress(Exception):
+                await sender_task
+        return transcript
+
+
+async def _deepgram_transcribe_stream(
+    *,
+    websocket: WebSocket,
+    queue: "asyncio.Queue[bytes | None]",
+    integration: IntegrationConfig,
+    model: str,
+    metadata: dict[str, Any],
+) -> str:
+    api_key = _integration_api_key(integration, "STT")
+    sample_rate = int(_ws_metadata_value(metadata, "sample_rate", DEFAULT_HA_STT_SAMPLE_RATE) or DEFAULT_HA_STT_SAMPLE_RATE)
+    channels = int(_ws_metadata_value(metadata, "channel", DEFAULT_HA_STT_CHANNELS) or DEFAULT_HA_STT_CHANNELS)
+    language = _normalize_language_hint(str(_ws_metadata_value(metadata, "language", "")))
+    params = {
+        "model": model or integration.default_stt_model or integration.default_model or DEFAULT_DEEPGRAM_MODEL,
+        "encoding": "linear16",
+        "sample_rate": sample_rate,
+        "channels": channels,
+        "smart_format": "true",
+        "interim_results": "true",
+        "endpointing": "300",
+    }
+    if language:
+        params["language"] = language
+    url = f"wss://api.deepgram.com/v1/listen?{urlencode(params)}"
+
+    async with _websocket_connect(url, {"Authorization": f"Token {api_key}"}) as provider_ws:
+        async def sender() -> None:
+            while True:
+                chunk = await queue.get()
+                if chunk is None:
+                    break
+                payload = _pcm_stream_payload(chunk)
+                if payload:
+                    await provider_ws.send(payload)
+            await provider_ws.send(json.dumps({"type": "CloseStream"}))
+
+        sender_task = asyncio.create_task(sender())
+        final_parts: list[str] = []
+        latest_partial = ""
+        try:
+            async with asyncio.timeout(45):
+                async for raw in provider_ws:
+                    data = json.loads(raw)
+                    if data.get("type") == "Metadata":
+                        continue
+                    channel = data.get("channel") or {}
+                    alternatives = channel.get("alternatives") or []
+                    transcript = str((alternatives[0] if alternatives else {}).get("transcript") or "").strip()
+                    if not transcript:
+                        if data.get("type") == "CloseStream":
+                            break
+                        continue
+                    if data.get("is_final"):
+                        final_parts.append(transcript)
+                    else:
+                        latest_partial = transcript
+                        await _send_ws_json(websocket, {"type": "partial", "text": transcript})
+                    if data.get("speech_final"):
+                        break
+        finally:
+            sender_task.cancel()
+            with suppress(Exception):
+                await sender_task
+        return " ".join(final_parts).strip() or latest_partial.strip()
+
+
+async def _streaming_transcribe_audio(
+    *,
+    websocket: WebSocket,
+    queue: "asyncio.Queue[bytes | None]",
+    config: RuntimeConfig,
+    flow: FlowConfig,
+    step,
+    integration: IntegrationConfig,
+    model: str,
+    metadata: dict[str, Any],
+) -> str:
+    kind = _streaming_stt_kind(integration, model)
+    if kind == "openai_realtime":
+        return await _openai_realtime_transcribe_stream(
+            websocket=websocket,
+            queue=queue,
+            config=config,
+            flow=flow,
+            integration=integration,
+            model=model,
+            metadata=metadata,
+        )
+    if kind == "deepgram":
+        return await _deepgram_transcribe_stream(
+            websocket=websocket,
+            queue=queue,
+            integration=integration,
+            model=model,
+            metadata=metadata,
+        )
+    raise RuntimeError(f"{integration.name} does not expose a HA Assist streaming STT bridge yet")
 
 
 def _secret(integration: IntegrationConfig | None, field: str = "api_key") -> str:

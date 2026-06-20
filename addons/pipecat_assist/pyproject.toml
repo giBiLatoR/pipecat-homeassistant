@@ -1,6 +1,6 @@
 [project]
 name = "pipecat-assist"
-version = "0.1.40"
+version = "0.1.41"
 description = "Home Assistant add-on for Pipecat realtime assistants"
 requires-python = ">=3.11,<3.14"
 dependencies = [
@@ -13,6 +13,7 @@ dependencies = [
     "pydantic>=2.8.0",
     "python-dotenv>=1.0.1",
     "uvicorn[standard]>=0.30.0",
+    "websockets>=13.0",
 ]
 
 [build-system]

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.41
+
+- Added a WebSocket-based Home Assistant STT bridge so HA Assist microphone
+  audio is forwarded to the add-on while it is still being captured.
+- Added streaming STT paths for OpenAI realtime transcription and Deepgram,
+  with buffered fallback for other configured pipelines such as Gemini Live or
+  Gemini Cloud.
+- Added best-effort TTS prefetch after HA Assist conversation responses so the
+  following HA TTS request can reuse already-started synthesis when possible.
+
 ## 0.1.40
 
 - Added early silence detection to the Home Assistant STT bridge so classic HA
