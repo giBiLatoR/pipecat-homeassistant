@@ -19,14 +19,32 @@ class PipecatAssistCard extends HTMLElement {
     return (this.config.url || "").replace(/\/$/, "");
   }
 
+  proxyMode() {
+    return !this.baseUrl();
+  }
+
   apiUrl(path) {
     const base = this.baseUrl();
     if (!base) return path;
     return `${base}/${path.replace(/^\//, "")}`;
   }
 
+  authHeaders() {
+    if (!this.proxyMode()) return {};
+    const token = this._hass?.auth?.data?.access_token
+      || this._hass?.connection?.options?.auth?.data?.access_token;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+
+  entryQuery() {
+    return this.config.entry_id ? `?entry_id=${encodeURIComponent(this.config.entry_id)}` : "";
+  }
+
   async loadAddonConfig() {
-    const response = await fetch(this.apiUrl("/api/assist/config"));
+    const path = this.proxyMode()
+      ? `/api/pipecat_assist/config${this.entryQuery()}`
+      : "/api/assist/config";
+    const response = await fetch(this.apiUrl(path), { headers: this.authHeaders() });
     if (!response.ok) throw new Error(`Config failed with HTTP ${response.status}`);
     return response.json();
   }
@@ -141,18 +159,21 @@ class PipecatAssistCard extends HTMLElement {
       await peer.setLocalDescription(offer);
       await this.waitForIce(peer);
 
-      const offerPath = addonConfig.runner_offer_path || "api/offer";
+      const offerPath = this.proxyMode()
+        ? `/api/pipecat_assist/offer${this.entryQuery()}`
+        : addonConfig.runner_offer_path || "api/offer";
+      const requestData = {
+        source: "lovelace_card",
+        client_id: this.clientId(),
+      };
+      if (this.config.flow_id) requestData.flow_id = this.config.flow_id;
       const response = await fetch(this.apiUrl(offerPath), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...this.authHeaders() },
         body: JSON.stringify({
           sdp: peer.localDescription.sdp,
           type: peer.localDescription.type,
-          request_data: {
-            flow_id: this.config.flow_id || addonConfig.selected_flow_id,
-            source: "lovelace_card",
-            client_id: this.clientId(),
-          },
+          request_data: requestData,
         }),
       });
       if (!response.ok) throw new Error(await response.text());

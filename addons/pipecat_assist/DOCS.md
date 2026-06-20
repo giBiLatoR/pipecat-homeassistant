@@ -176,13 +176,14 @@ Pipecat Assist integration is installed. Add a manual card:
 ```yaml
 type: custom:pipecat-assist-card
 name: Pipecat Assist
-url: /api/hassio_ingress/<your-add-on-ingress-token>
-# flow_id: optional-flow-id
 ```
 
-Use the add-on's Ingress API base URL or a direct add-on URL that can reach
-`/api/assist/config` and `/api/offer`. The card uses the active pipeline unless
-`flow_id` is provided.
+The card talks to Home Assistant at `/api/pipecat_assist/config` and
+`/api/pipecat_assist/offer`. The custom component proxies those calls to the
+add-on and keeps the add-on Ingress token out of dashboard YAML. The card uses
+the active pipeline selected in the add-on. If you configure more than one
+Pipecat Assist integration entry, add `entry_id` to point the card at a
+specific entry.
 
 ### Gemini troubleshooting
 

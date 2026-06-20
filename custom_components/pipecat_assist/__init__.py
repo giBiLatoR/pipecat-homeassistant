@@ -8,6 +8,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
+from .views import register_proxy_views
+
 PLATFORMS = [Platform.CONVERSATION, Platform.STT, Platform.TTS]
 CARD_MODULE_URL = "/pipecat_assist/pipecat-assist-card.js"
 
@@ -16,6 +18,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Pipecat Assist from a config entry."""
 
     await _async_register_static_path(hass)
+    register_proxy_views(hass)
     _async_register_frontend_module(hass)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

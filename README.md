@@ -110,7 +110,9 @@ the requested bridge operation.
 
 The Lovelace card is served by the integration at
 `/pipecat_assist/pipecat-assist-card.js`, is loaded automatically by the custom
-component, and uses the same WebRTC assistant path as the add-on demo.
+component, and uses the same WebRTC assistant path as the add-on demo. It calls
+the custom component proxy by default, so dashboard YAML does not need an
+Ingress token or flow ID.
 
 ## Audio debugging
 

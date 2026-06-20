@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.31
+
+- Added authenticated Home Assistant proxy endpoints for the Lovelace card, so
+  dashboard YAML no longer needs an add-on Ingress token.
+- Changed the Lovelace card to use the active add-on pipeline by default
+  instead of sending a flow ID.
+- Simplified new custom component setup to only ask for the add-on URL.
+
 ## 0.1.30
 
 - Automatically load the Lovelace card module when the Pipecat Assist custom

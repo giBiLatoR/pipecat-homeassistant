@@ -12,7 +12,7 @@ from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import CONF_FLOW_ID, CONF_TOKEN, CONF_URL, DEFAULT_URL, DOMAIN
+from .const import CONF_URL, DEFAULT_URL, DOMAIN
 
 
 async def _validate_url(hass: HomeAssistant, url: str) -> None:
@@ -43,11 +43,7 @@ class PipecatAssistConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 await self.async_set_unique_id(url)
                 self._abort_if_unique_id_configured()
-                data = {
-                    CONF_URL: url,
-                    CONF_TOKEN: user_input.get(CONF_TOKEN, ""),
-                    CONF_FLOW_ID: user_input.get(CONF_FLOW_ID, ""),
-                }
+                data = {CONF_URL: url}
                 return self.async_create_entry(title="Pipecat Assist", data=data)
 
         return self.async_show_form(
@@ -55,10 +51,7 @@ class PipecatAssistConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_URL, default=DEFAULT_URL): str,
-                    vol.Optional(CONF_TOKEN): str,
-                    vol.Optional(CONF_FLOW_ID): str,
                 }
             ),
             errors=errors,
         )
-
