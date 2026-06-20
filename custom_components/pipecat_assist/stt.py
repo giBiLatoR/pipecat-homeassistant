@@ -12,7 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_FLOW_ID, CONF_TOKEN, CONF_URL, LANGUAGE
+from .const import CONF_FLOW_ID, CONF_TOKEN, CONF_URL, SUPPORTED_LANGUAGES
 
 
 async def async_setup_entry(
@@ -41,7 +41,7 @@ class PipecatAssistSpeechToTextEntity(stt.SpeechToTextEntity):
     def supported_languages(self) -> list[str]:
         """Return supported languages."""
 
-        return [LANGUAGE]
+        return SUPPORTED_LANGUAGES
 
     @property
     def supported_formats(self) -> list[stt.AudioFormats]:

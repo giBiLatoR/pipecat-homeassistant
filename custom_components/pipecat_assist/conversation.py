@@ -7,12 +7,13 @@ import aiohttp
 
 from homeassistant.components import conversation
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import MATCH_ALL
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import intent
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_FLOW_ID, CONF_TOKEN, CONF_URL, LANGUAGE
+from .const import CONF_FLOW_ID, CONF_TOKEN, CONF_URL
 
 
 async def async_setup_entry(
@@ -39,10 +40,10 @@ class PipecatAssistConversationEntity(conversation.ConversationEntity):
         self._session = async_get_clientsession(hass)
 
     @property
-    def supported_languages(self) -> list[str]:
+    def supported_languages(self) -> str:
         """Return supported languages."""
 
-        return [LANGUAGE]
+        return MATCH_ALL
 
     async def async_process(
         self, user_input: conversation.ConversationInput

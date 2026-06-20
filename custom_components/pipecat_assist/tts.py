@@ -12,7 +12,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_FLOW_ID, CONF_TOKEN, CONF_URL, LANGUAGE
+from .const import (
+    CONF_FLOW_ID,
+    CONF_TOKEN,
+    CONF_URL,
+    DEFAULT_LANGUAGE,
+    SUPPORTED_LANGUAGES,
+)
 
 
 async def async_setup_entry(
@@ -30,8 +36,8 @@ class PipecatAssistTextToSpeechEntity(TextToSpeechEntity):
 
     _attr_has_entity_name = True
     _attr_name = "Pipecat Assist"
-    _attr_default_language = LANGUAGE
-    _attr_supported_languages = [LANGUAGE]
+    _attr_default_language = DEFAULT_LANGUAGE
+    _attr_supported_languages = SUPPORTED_LANGUAGES
     _attr_supported_options: list[str] = []
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:

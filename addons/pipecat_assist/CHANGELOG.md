@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.34
+
+- Fixed Home Assistant Assist language filtering by advertising all languages
+  for the conversation entity and broad STT/TTS language support including
+  Polish, so Pipecat Assist can be selected for Polish and other HA assistant
+  languages.
+
 ## 0.1.33
 
 - Fixed Lovelace card static asset registration on Home Assistant versions
