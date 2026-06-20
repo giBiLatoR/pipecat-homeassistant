@@ -1332,15 +1332,17 @@ html[data-theme="dark"] .status-pill.error {
 }
 
 .active-badge {
-  display: inline-flex;
+  display: inline-grid;
+  grid-auto-flow: column;
+  grid-auto-columns: max-content;
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
-  width: 92px;
+  width: auto;
+  min-width: 104px;
   height: 38px;
   min-height: 38px;
   flex: 0 0 auto;
-  flex-wrap: nowrap;
   gap: 7px;
   border: 1px solid rgba(44, 182, 125, 0.45);
   border-radius: 6px;
@@ -1351,13 +1353,14 @@ html[data-theme="dark"] .status-pill.error {
   font-weight: 800;
   line-height: 1;
   white-space: nowrap;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .active-badge svg,
 .active-badge span {
-  display: block;
+  display: inline-flex;
   flex: 0 0 auto;
+  align-items: center;
   margin: 0;
   color: inherit;
   font-size: inherit;

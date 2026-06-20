@@ -25,6 +25,7 @@ class MCPAuthenticationError(RuntimeError):
 
 
 MCP_CALL_HISTORY: deque[dict[str, Any]] = deque(maxlen=100)
+MCP_TOOLS_SCHEMA_CACHE: dict[tuple[str, tuple[str, ...]], tuple[ToolsSchema, float]] = {}
 
 
 def _compact_json(value: Any, limit: int = 1200) -> str:
@@ -51,6 +52,12 @@ def clear_mcp_call_history() -> dict[str, Any]:
 
     MCP_CALL_HISTORY.clear()
     return list_mcp_call_history()
+
+
+def clear_mcp_tools_cache() -> None:
+    """Clear cached MCP tool schemas."""
+
+    MCP_TOOLS_SCHEMA_CACHE.clear()
 
 
 def _new_history_item(name: str, arguments: dict[str, Any]) -> tuple[dict[str, Any], float]:
@@ -213,12 +220,33 @@ class HomeAssistantMCPBridge:
         except Exception as err:
             logger.debug("Ignoring MCP close error: {}", err)
 
-    async def tools_schema(self) -> ToolsSchema:
+    async def tools_schema(
+        self,
+        *,
+        cache_enabled: bool = True,
+        cache_ttl_seconds: int = 300,
+        refresh: bool = False,
+    ) -> ToolsSchema:
         """Return MCP tools in Pipecat schema format."""
 
         if not self.client:
             raise RuntimeError("MCP bridge is not started")
-        return await self.client.get_tools_schema()
+        cache_key = (self.url, tuple(self.tool_allowlist))
+        cached = MCP_TOOLS_SCHEMA_CACHE.get(cache_key)
+        now = time.time()
+        if (
+            cache_enabled
+            and not refresh
+            and cached
+            and (cache_ttl_seconds <= 0 or now - cached[1] <= cache_ttl_seconds)
+        ):
+            logger.debug("Using cached Home Assistant MCP tool schema for {}", self.url)
+            return cached[0]
+
+        tools = await self.client.get_tools_schema()
+        if cache_enabled:
+            MCP_TOOLS_SCHEMA_CACHE[cache_key] = (tools, now)
+        return tools
 
     async def register_tools_schema(self, tools: ToolsSchema, llm: LLMService) -> None:
         """Register MCP tools with a Pipecat LLM service."""
@@ -250,12 +278,24 @@ class HomeAssistantMCPBridge:
 
 
 
-async def check_mcp(url: str, token: str, tool_allowlist: Sequence[str] | None = None) -> dict[str, Any]:
+async def check_mcp(
+    url: str,
+    token: str,
+    tool_allowlist: Sequence[str] | None = None,
+    *,
+    cache_enabled: bool = True,
+    cache_ttl_seconds: int = 300,
+    refresh: bool = False,
+) -> dict[str, Any]:
     """Probe MCP connectivity for the status endpoint."""
 
     try:
         async with HomeAssistantMCPBridge(url, token, tool_allowlist) as bridge:
-            tools = await bridge.tools_schema()
+            tools = await bridge.tools_schema(
+                cache_enabled=cache_enabled,
+                cache_ttl_seconds=cache_ttl_seconds,
+                refresh=refresh,
+            )
             return {
                 "ok": True,
                 "tool_count": len(tools.standard_tools),

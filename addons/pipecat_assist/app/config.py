@@ -35,6 +35,7 @@ DEFAULT_CARTESIA_VOICE = "f786b574-daa5-4673-aa0c-cbe3e8534c02"
 DEFAULT_ELEVENLABS_MODEL = "eleven_flash_v2_5"
 DEFAULT_ELEVENLABS_VOICE = "Xb7hH8MSUJpSbSDYk0k2"
 DEFAULT_GOOGLE_TTS_VOICE = "en-US-Chirp3-HD-Charon"
+DEFAULT_WEB_SEARCH_MODEL = "gpt-5.5"
 DEFAULT_AWS_NOVA_SONIC_MODEL = "amazon.nova-2-sonic-v1:0"
 DEFAULT_AWS_NOVA_SONIC_VOICE = "matthew"
 DEFAULT_AWS_BEDROCK_MODEL = "amazon.nova-pro-v1:0"
@@ -109,6 +110,7 @@ class IntegrationConfig(BaseModel):
         "gemini",
         "gemini_cloud",
         "google_cloud_tts",
+        "google_streaming_tts",
         "soniox",
         "deepgram",
         "cartesia",
@@ -122,6 +124,7 @@ class IntegrationConfig(BaseModel):
         "openai_compatible",
         "ollama",
         "local_runtime",
+        "web_search",
         "home_assistant_mcp",
     ]
     enabled: bool = False
@@ -133,6 +136,7 @@ class IntegrationConfig(BaseModel):
     deployment: str = ""
     language: str = "en"
     speed: float = Field(default=1.0, ge=0.25, le=1.5)
+    tts_streaming_mode: Literal["sentence", "token"] = "sentence"
     default_model: str = ""
     default_realtime_model: str = ""
     default_stt_model: str = ""
@@ -213,13 +217,24 @@ def default_integrations() -> list[IntegrationConfig]:
         ),
         IntegrationConfig(
             id="google-cloud-tts",
-            name="Google Cloud TTS",
+            name="Google Cloud TTS HTTP",
             kind="google_cloud_tts",
             enabled=bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS")),
             credentials_path=os.getenv("GOOGLE_APPLICATION_CREDENTIALS", ""),
             location=os.getenv("GOOGLE_CLOUD_TTS_LOCATION", ""),
             default_model="google-tts",
             default_voice=os.getenv("GOOGLE_TTS_VOICE", DEFAULT_GOOGLE_TTS_VOICE),
+        ),
+        IntegrationConfig(
+            id="google-streaming-tts",
+            name="Google Cloud TTS Streaming",
+            kind="google_streaming_tts",
+            enabled=bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS")),
+            credentials_path=os.getenv("GOOGLE_APPLICATION_CREDENTIALS", ""),
+            location=os.getenv("GOOGLE_CLOUD_TTS_LOCATION", ""),
+            default_model="google-streaming-tts",
+            default_voice=os.getenv("GOOGLE_TTS_VOICE", DEFAULT_GOOGLE_TTS_VOICE),
+            tts_streaming_mode="sentence",
         ),
         IntegrationConfig(
             id="soniox",
@@ -317,6 +332,14 @@ def default_integrations() -> list[IntegrationConfig]:
             name="Local runtime",
             kind="local_runtime",
             enabled=False,
+        ),
+        IntegrationConfig(
+            id="web-search",
+            name="Web Search",
+            kind="web_search",
+            enabled=False,
+            api_key=os.getenv("OPENAI_API_KEY", ""),
+            default_model=os.getenv("WEB_SEARCH_MODEL", DEFAULT_WEB_SEARCH_MODEL),
         ),
         IntegrationConfig(
             id="ha-mcp",
@@ -434,6 +457,7 @@ class FlowConfig(BaseModel):
     reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = None
     mcp_enabled: bool = True
     mcp_tool_allowlist: list[str] = Field(default_factory=list)
+    web_search_enabled: bool = False
     video_enabled: bool = False
     steps: list[PipelineStepConfig] = Field(default_factory=default_steps)
     conversation_flow: dict[str, Any] = Field(default_factory=default_conversation_flow)
@@ -452,7 +476,7 @@ class FlowConfig(BaseModel):
 class RuntimeConfig(BaseModel):
     """Persisted runtime configuration edited by the web UI."""
 
-    version: int = 13
+    version: int = 14
     openai_api_key: str = ""
     text_model: str = DEFAULT_GEMINI_TEXT_MODEL
     ha_mcp_url: str = ""
@@ -464,6 +488,11 @@ class RuntimeConfig(BaseModel):
     enable_default_ice_servers: bool = False
     audio_debug_enabled: bool = False
     audio_debug_keep_sessions: int = Field(default=10, ge=1, le=100)
+    session_memory_enabled: bool = True
+    session_memory_reuse_seconds: int = Field(default=300, ge=0, le=86400)
+    session_memory_max_messages: int = Field(default=12, ge=0, le=100)
+    mcp_tools_cache_enabled: bool = True
+    mcp_tools_cache_ttl_seconds: int = Field(default=300, ge=0, le=86400)
     selected_flow_id: str = "home-default"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     integrations: list[IntegrationConfig] = Field(default_factory=default_integrations)
@@ -607,6 +636,11 @@ def default_config_from_environment() -> RuntimeConfig:
         esp32_mode=_env_bool("ESP32_MODE", False),
         audio_debug_enabled=_env_bool("AUDIO_DEBUG_ENABLED", False),
         audio_debug_keep_sessions=min(100, max(1, _env_int("AUDIO_DEBUG_KEEP_SESSIONS", 10))),
+        session_memory_enabled=_env_bool("SESSION_MEMORY_ENABLED", True),
+        session_memory_reuse_seconds=max(0, min(86400, _env_int("SESSION_MEMORY_REUSE_SECONDS", 300))),
+        session_memory_max_messages=max(0, min(100, _env_int("SESSION_MEMORY_MAX_MESSAGES", 12))),
+        mcp_tools_cache_enabled=_env_bool("MCP_TOOLS_CACHE_ENABLED", True),
+        mcp_tools_cache_ttl_seconds=max(0, min(86400, _env_int("MCP_TOOLS_CACHE_TTL_SECONDS", 300))),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         flows=[flow],
     )
@@ -949,12 +983,37 @@ def _repair_provider_defaults(config: RuntimeConfig) -> bool:
 
     google_tts = config.integration("google-cloud-tts")
     if google_tts:
+        if google_tts.name == "Google Cloud TTS":
+            google_tts.name = "Google Cloud TTS HTTP"
+            changed = True
         if not google_tts.default_voice:
             google_tts.default_voice = os.getenv("GOOGLE_TTS_VOICE", DEFAULT_GOOGLE_TTS_VOICE)
             changed = True
         if not google_tts.credentials_path and os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
             google_tts.credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
             google_tts.enabled = True
+            changed = True
+
+    google_streaming_tts = config.integration("google-streaming-tts")
+    if google_streaming_tts:
+        if not google_streaming_tts.default_model:
+            google_streaming_tts.default_model = "google-streaming-tts"
+            changed = True
+        if not google_streaming_tts.default_voice:
+            google_streaming_tts.default_voice = os.getenv("GOOGLE_TTS_VOICE", DEFAULT_GOOGLE_TTS_VOICE)
+            changed = True
+        if not google_streaming_tts.credentials_path and os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+            google_streaming_tts.credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+            google_streaming_tts.enabled = True
+            changed = True
+
+    web_search = config.integration("web-search")
+    if web_search:
+        if not web_search.default_model:
+            web_search.default_model = os.getenv("WEB_SEARCH_MODEL", DEFAULT_WEB_SEARCH_MODEL)
+            changed = True
+        if os.getenv("OPENAI_API_KEY") and not web_search.api_key:
+            web_search.api_key = os.getenv("OPENAI_API_KEY", "")
             changed = True
 
     provider_defaults = {
@@ -1150,6 +1209,10 @@ class ConfigStore:
             config.version = 13
             for flow in config.flows:
                 changed = _ensure_composed_vad_step(flow) or changed
+            changed = True
+
+        if config.version < 14:
+            config.version = 14
             changed = True
 
         for flow in config.flows:

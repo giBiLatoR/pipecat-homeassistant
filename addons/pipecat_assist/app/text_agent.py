@@ -10,8 +10,9 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from app.config import DEFAULT_GEMINI_TEXT_MODEL, RuntimeConfig
+from app.config import DEFAULT_GEMINI_TEXT_MODEL, DEFAULT_WEB_SEARCH_MODEL, RuntimeConfig
 from app.mcp_bridge import HomeAssistantMCPBridge
+from app.web_search_tool import WEB_SEARCH_TOOL_NAME, run_openai_web_search
 
 
 def _format_openai_tools(tools_schema) -> list[dict[str, Any]]:
@@ -48,9 +49,42 @@ def _tool_args(raw: str | None) -> dict[str, Any]:
 
 def _text_model(config: RuntimeConfig, provider_kind: str, integration, flow) -> str:
     model = flow.text_model or (integration.default_model if integration else "") or config.text_model
-    if provider_kind == "gemini" and (not model or model.startswith(("gpt-", "claude-"))):
+    if provider_kind in {"gemini", "gemini_cloud"} and (not model or model.startswith(("gpt-", "claude-"))):
         return (integration.default_model if integration else "") or DEFAULT_GEMINI_TEXT_MODEL
     return model
+
+
+def _web_search_tool(config: RuntimeConfig, flow) -> tuple[dict[str, Any], str, str] | None:
+    if not flow.web_search_enabled:
+        return None
+    integration = config.integration("web-search")
+    if not integration or not integration.enabled:
+        return None
+    api_key = (integration.api_key or config.openai_api_key or "").strip()
+    if not api_key:
+        return None
+    model = integration.default_model or DEFAULT_WEB_SEARCH_MODEL
+    return (
+        {
+            "type": "function",
+            "function": {
+                "name": WEB_SEARCH_TOOL_NAME,
+                "description": "Search the web for fresh public information and return a concise answer.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query.",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
+        api_key,
+        model,
+    )
 
 
 async def run_text_conversation(
@@ -67,7 +101,7 @@ async def run_text_conversation(
     flow = config.selected_flow(flow_id)
     integration = config.model_integration(flow)
     provider_kind = integration.kind if integration else "openai"
-    if provider_kind not in {"openai", "openai_cloud", "gemini", "openai_compatible", "ollama"}:
+    if provider_kind not in {"openai", "openai_cloud", "gemini", "gemini_cloud", "openai_compatible", "ollama"}:
         return {
             "speech": "This Pipecat Assist text bridge does not support the selected model provider yet.",
             "conversation_id": conversation_id,
@@ -75,7 +109,7 @@ async def run_text_conversation(
             "error": "unsupported_text_provider",
         }
 
-    if provider_kind == "gemini":
+    if provider_kind in {"gemini", "gemini_cloud"}:
         api_key = (integration.api_key if integration else "") or os.getenv("GOOGLE_API_KEY", "")
     else:
         api_key = (integration.api_key if integration else "") or config.openai_api_key
@@ -106,7 +140,7 @@ async def run_text_conversation(
     client_kwargs: dict[str, Any] = {"api_key": api_key}
     if integration and integration.base_url and provider_kind in {"openai_compatible", "ollama"}:
         client_kwargs["base_url"] = integration.base_url
-    if provider_kind == "gemini":
+    if provider_kind in {"gemini", "gemini_cloud"}:
         client_kwargs["base_url"] = (
             integration.base_url
             if integration and integration.base_url
@@ -114,6 +148,9 @@ async def run_text_conversation(
         )
     client = AsyncOpenAI(**client_kwargs)
     tools: list[dict[str, Any]] = []
+    web_search = _web_search_tool(config, flow)
+    if web_search:
+        tools.append(web_search[0])
 
     bridge: HomeAssistantMCPBridge | None = None
     if flow.mcp_enabled and mcp_token:
@@ -124,8 +161,11 @@ async def run_text_conversation(
         )
         try:
             await bridge.start()
-            tools_schema = await bridge.tools_schema()
-            tools = _format_openai_tools(tools_schema)
+            tools_schema = await bridge.tools_schema(
+                cache_enabled=config.mcp_tools_cache_enabled,
+                cache_ttl_seconds=config.mcp_tools_cache_ttl_seconds,
+            )
+            tools.extend(_format_openai_tools(tools_schema))
         except asyncio.CancelledError as err:
             with suppress(Exception):
                 await bridge.close()
@@ -169,7 +209,7 @@ async def run_text_conversation(
                     "continue_conversation": False,
                 }
 
-            if bridge is None:
+            if bridge is None and any(tool_call.function.name != WEB_SEARCH_TOOL_NAME for tool_call in tool_calls):
                 return {
                     "speech": "I need Home Assistant MCP tools for that, but MCP is not connected.",
                     "conversation_id": conversation_id,
@@ -178,10 +218,19 @@ async def run_text_conversation(
                 }
 
             for tool_call in tool_calls:
-                result = await bridge.call_tool(
-                    tool_call.function.name,
-                    _tool_args(tool_call.function.arguments),
-                )
+                arguments = _tool_args(tool_call.function.arguments)
+                if tool_call.function.name == WEB_SEARCH_TOOL_NAME:
+                    if not web_search:
+                        result = "Web search is not configured."
+                    else:
+                        _, search_api_key, search_model = web_search
+                        result = await run_openai_web_search(
+                            search_api_key,
+                            search_model,
+                            str(arguments.get("query") or text),
+                        )
+                else:
+                    result = await bridge.call_tool(tool_call.function.name, arguments)
                 messages.append(
                     {
                         "role": "tool",

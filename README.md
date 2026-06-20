@@ -49,8 +49,8 @@ flowchart LR
 6. Configure model providers:
    Gemini Live is the default, and additional providers such as OpenAI,
    Soniox, Deepgram, Cartesia, Gradium, Speechmatics, AWS, ElevenLabs, Google
-   Cloud TTS, OpenAI-compatible endpoints, Ollama, and local runtimes can be
-   added from **Integrations**.
+   Cloud TTS HTTP/Streaming, OpenAI-compatible endpoints, Ollama, local
+   runtimes, and Web Search can be added from **Integrations**.
 7. Choose or create a pipeline. The built-in catalog includes realtime
    speech-to-speech profiles and composed realtime profiles such as
    `Soniox + OpenAI + Cartesia`, `Deepgram + Gemini + Google TTS`, and
@@ -65,11 +65,13 @@ long-lived access tokens are only needed for custom installations outside the
 Supervisor path.
 
 Gemini Live is the default first-run pipeline. Add a Google AI Studio key in
-**Integrations > Google Gemini**, keep `models/gemini-3.1-flash-live-preview`
-as the realtime model, and use **Assistant > Start voice test** to verify the
-browser voice path. The Home Assistant conversation bridge is a text-path test;
-install `custom_components/pipecat_assist`, add the **Pipecat Assist**
-integration, and select **Pipecat Realtime** as the conversation agent.
+**Integrations > Google Gemini Live**, keep
+`models/gemini-3.1-flash-live-preview` as the realtime model, and use
+**Assistant > Start voice test** to verify the browser voice path. The Home
+Assistant conversation bridge is a text-path test; configure Google Gemini
+Cloud or OpenAI Cloud for text/composed runtime tests, install
+`custom_components/pipecat_assist`, add the **Pipecat Assist** integration, and
+select **Pipecat Realtime** as the conversation agent.
 
 ## Pipelines and Pipecat Flows
 
@@ -80,7 +82,14 @@ Pipecat Assist supports two realtime runtime families:
   profiles and Gemini Live remains the first-run default.
 - **Composed realtime**: streaming STT, streaming LLM, and streaming TTS are
   chained by Pipecat. These pipelines are still realtime over WebRTC, but each
-  stage can use a different provider.
+  stage can use a different provider. Compatible TTS providers can synthesize
+  streamed LLM output in sentence or token chunks.
+
+Provider integrations are intentionally split by capability. OpenAI Realtime
+and Gemini Live are speech-to-speech providers; OpenAI Cloud and Google Gemini
+Cloud are composed/text providers. Web Search is a separate optional tool that
+can be exposed from the LLM step while Home Assistant device control remains on
+MCP.
 
 Official `pipecat-ai-flows` support is enabled for composed realtime pipelines.
 The flow editor stores nodes, transition functions, JSON schemas, and optional

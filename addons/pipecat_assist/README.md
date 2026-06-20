@@ -14,8 +14,10 @@ Pipecat ESP32 satellites, and future Home Assistant cards.
 
 Gemini Live is preconfigured as the default speech-to-speech profile. The UI
 also includes composed realtime profiles such as `Soniox + OpenAI + Cartesia`,
-`Deepgram + Gemini + Google TTS`, and `Speechmatics + AWS Nova Pro +
-ElevenLabs`. Official Pipecat Flows can be enabled inside composed realtime
+`Deepgram + Gemini + Google TTS Streaming`, and `Speechmatics + AWS Nova Pro +
+ElevenLabs`. Provider settings are configured in **Integrations**: realtime
+providers, cloud STT/LLM/TTS providers, Web Search, and Home Assistant MCP are
+kept separate. Official Pipecat Flows can be enabled inside composed realtime
 pipelines.
 
 For setup, testing, and troubleshooting, see `DOCS.md`.

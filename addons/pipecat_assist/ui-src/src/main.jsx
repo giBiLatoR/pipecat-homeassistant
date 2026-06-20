@@ -19,6 +19,7 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  Search,
   Server,
   Settings,
   SlidersHorizontal,
@@ -81,6 +82,7 @@ const AWS_BEDROCK_MODEL = "amazon.nova-pro-v1:0";
 const DEEPGRAM_MODEL = "nova-3";
 const SONIOX_MODEL = "stt-rt-v5";
 const SPEECHMATICS_MODEL = "enhanced";
+const WEB_SEARCH_MODEL = "gpt-5.5";
 const OPENAI_REALTIME_VOICES = [
   "alloy",
   "ash",
@@ -99,7 +101,8 @@ const providerKinds = [
   ["openai_cloud", "OpenAI Cloud", Cloud],
   ["gemini", "Google Gemini Live", Radio],
   ["gemini_cloud", "Google Gemini Cloud", Cloud],
-  ["google_cloud_tts", "Google Cloud TTS", Cloud],
+  ["google_cloud_tts", "Google Cloud TTS HTTP", Cloud],
+  ["google_streaming_tts", "Google Cloud TTS Streaming", Radio],
   ["soniox", "Soniox", Cloud],
   ["deepgram", "Deepgram", Cloud],
   ["cartesia", "Cartesia", Cloud],
@@ -113,10 +116,11 @@ const providerKinds = [
   ["openai_compatible", "OpenAI-compatible", Server],
   ["ollama", "Ollama", Cpu],
   ["local_runtime", "Local runtime", Cpu],
+  ["web_search", "Web Search", Search],
   ["home_assistant_mcp", "Home Assistant MCP", Home],
 ];
 
-const protectedIntegrationIds = ["gemini", "gemini-cloud", "openai", "openai-cloud", "ha-mcp"];
+const protectedIntegrationIds = ["gemini", "gemini-cloud", "openai", "openai-cloud", "ha-mcp", "web-search"];
 
 const languageIntegrationKinds = [
   "gemini",
@@ -133,6 +137,7 @@ const languageIntegrationKinds = [
 ];
 
 const speedIntegrationKinds = ["openai", "openai_cloud", "google_cloud_tts", "elevenlabs"];
+const ttsStreamingIntegrationKinds = ["cartesia", "elevenlabs", "soniox", "gradium", "google_streaming_tts"];
 
 const stepTypes = [
   ["transport", "Transport", Radio, "neutral"],
@@ -150,10 +155,11 @@ const addableStepTypes = stepTypes.filter(([kind]) => !["transport", "output"].i
 const stepProviders = {
   stt: ["soniox", "deepgram", "speechmatics", "gradium", "openai_cloud"],
   llm: ["openai_cloud", "gemini_cloud", "aws_bedrock", "openai_compatible", "ollama"],
-  tts: ["cartesia", "gradium", "google_cloud_tts", "elevenlabs", "openai_cloud", "soniox"],
+  tts: ["cartesia", "gradium", "google_cloud_tts", "google_streaming_tts", "elevenlabs", "openai_cloud", "soniox"],
   tools: ["home_assistant_mcp"],
   output: ["gemini", "openai", "aws_nova_sonic"],
 };
+const runtimeStepOrder = ["transport", "vad", "stt", "llm", "tools", "flow", "tts", "output"];
 
 function allowedProvidersForStep(kind, mode) {
   if (kind === "llm" && mode === "realtime") return ["gemini", "openai", "aws_nova_sonic"];
@@ -268,7 +274,7 @@ const templates = [
       ["llm", "llm", "Gemini Cloud LLM", "gemini-cloud"],
       ["tools", "tools", "HA MCP tools", "ha-mcp"],
       ["flow", "flow", "Pipecat Flow", ""],
-      ["tts", "tts", "Google TTS Chirp 3", "google-cloud-tts"],
+      ["tts", "tts", "Google TTS Streaming", "google-streaming-tts"],
       ["output", "output", "Audio output", ""],
     ],
   },
@@ -287,7 +293,7 @@ const templates = [
       ["llm", "llm", "Gemini Cloud LLM", "gemini-cloud"],
       ["tools", "tools", "HA MCP tools", "ha-mcp"],
       ["flow", "flow", "Pipecat Flow", ""],
-      ["tts", "tts", "Google TTS Chirp 3", "google-cloud-tts"],
+      ["tts", "tts", "Google TTS Streaming", "google-streaming-tts"],
       ["output", "output", "Audio output", ""],
     ],
   },
@@ -325,7 +331,7 @@ const templates = [
       ["llm", "llm", "Cloud LLM", "gemini-cloud"],
       ["tools", "tools", "HA MCP tools", "ha-mcp"],
       ["flow", "flow", "Pipecat Flow", ""],
-      ["tts", "tts", "Cloud TTS", "google-cloud-tts"],
+      ["tts", "tts", "Cloud TTS", "google-streaming-tts"],
       ["output", "output", "Audio output", ""],
     ],
   },
@@ -384,6 +390,7 @@ const defaultFlow = {
   reasoning_effort: "",
   mcp_enabled: true,
   mcp_tool_allowlist: [],
+  web_search_enabled: false,
   video_enabled: false,
   steps: [],
   conversation_flow: {
@@ -943,7 +950,11 @@ function providerDefaults(provider) {
   if (provider === "google-cloud-tts" || provider === "google_cloud_tts") {
     return { model: "google-tts", text_model: "", voice: GOOGLE_TTS_VOICE };
   }
+  if (provider === "google-streaming-tts" || provider === "google_streaming_tts") {
+    return { model: "google-streaming-tts", text_model: "", voice: GOOGLE_TTS_VOICE };
+  }
   if (provider === "speechmatics") return { model: SPEECHMATICS_MODEL, text_model: "", voice: "" };
+  if (provider === "web_search" || provider === "web-search") return { model: WEB_SEARCH_MODEL, text_model: WEB_SEARCH_MODEL, voice: "" };
   if (provider === "openai_compatible" || provider === "openai-compatible") return { model: "", text_model: "", voice: "" };
   return {};
 }
@@ -1079,11 +1090,26 @@ function ensureShape(config) {
     ...integration,
     language: integration.language || "en",
     speed: Number(integration.speed || 1),
+    tts_streaming_mode: integration.tts_streaming_mode || "sentence",
   }));
   shaped.audio_debug_enabled = Boolean(shaped.audio_debug_enabled);
   shaped.audio_debug_keep_sessions = Math.min(
     100,
     Math.max(1, Number(shaped.audio_debug_keep_sessions || 10)),
+  );
+  shaped.session_memory_enabled = shaped.session_memory_enabled !== false;
+  shaped.session_memory_reuse_seconds = Math.min(
+    86400,
+    Math.max(0, Number(shaped.session_memory_reuse_seconds ?? 300)),
+  );
+  shaped.session_memory_max_messages = Math.min(
+    100,
+    Math.max(0, Number(shaped.session_memory_max_messages ?? 12)),
+  );
+  shaped.mcp_tools_cache_enabled = shaped.mcp_tools_cache_enabled !== false;
+  shaped.mcp_tools_cache_ttl_seconds = Math.min(
+    86400,
+    Math.max(0, Number(shaped.mcp_tools_cache_ttl_seconds ?? 300)),
   );
   shaped.flows = (shaped.flows?.length ? shaped.flows : [clone(defaultFlow)]).map((flow) => {
     const merged = { ...clone(defaultFlow), ...flow };
@@ -1128,6 +1154,7 @@ function syncFlow(flow, config = null) {
       ? { ...(flow.conversation_flow || clone(defaultFlow.conversation_flow)), enabled: false }
       : flow.conversation_flow,
     mcp_enabled: hasTools,
+    web_search_enabled: Boolean(flow.web_search_enabled),
     language: flow.language || "en",
     max_output_tokens: flow.max_output_tokens ? Number(flow.max_output_tokens) : null,
     reasoning_effort: flow.reasoning_effort || null,
@@ -1194,6 +1221,7 @@ function integrationSummary(integration, config = null) {
       "gradium",
       "speechmatics",
       "elevenlabs",
+      "web_search",
     ].includes(integration.kind)
   ) {
     const status = secretStatus(integration, "api_key");
@@ -1201,7 +1229,7 @@ function integrationSummary(integration, config = null) {
     if (status === "pending") return "save pending";
     return "API key missing";
   }
-  if (integration.kind === "google_cloud_tts") {
+  if (["google_cloud_tts", "google_streaming_tts"].includes(integration.kind)) {
     if (integration.credentials_path) return "credentials path";
     return secretStatus(integration, "credentials_json") === "configured" ? "credentials saved" : "credentials missing";
   }
@@ -1545,6 +1573,7 @@ function App() {
       deployment: "",
       language: "en",
       speed: 1,
+      tts_streaming_mode: "sentence",
       default_model: providerDefaults(kind).text_model || "",
       default_realtime_model: providerDefaults(kind).model || "",
       default_stt_model: providerDefaults(kind).stt_model || "",
@@ -1626,7 +1655,7 @@ function App() {
     const response = await fetch(API.mcp, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ flow_id: selectedFlow.id }),
+      body: JSON.stringify({ flow_id: selectedFlow.id, refresh: true }),
     });
     const result = await response.json();
     setMcpResult(result);
@@ -1864,14 +1893,26 @@ function pipelineReadiness(config, flow) {
       continue;
     }
     if (
-      !["home_assistant_mcp", "google_cloud_tts", "aws_bedrock", "aws_nova_sonic", "ollama", "local_runtime"].includes(
+      ![
+        "home_assistant_mcp",
+        "google_cloud_tts",
+        "google_streaming_tts",
+        "aws_bedrock",
+        "aws_nova_sonic",
+        "ollama",
+        "local_runtime",
+      ].includes(
         integration.kind,
       ) &&
       secretStatus(integration, "api_key") === "missing"
     ) {
       missing.push(integration.name);
     }
-    if (integration.kind === "google_cloud_tts" && !integration.credentials_path && secretStatus(integration, "credentials_json") === "missing") {
+    if (
+      ["google_cloud_tts", "google_streaming_tts"].includes(integration.kind) &&
+      !integration.credentials_path &&
+      secretStatus(integration, "credentials_json") === "missing"
+    ) {
       missing.push(integration.name);
     }
     if (["aws_bedrock", "aws_nova_sonic"].includes(integration.kind)) {
@@ -1906,6 +1947,20 @@ function validatePipeline(config, flow) {
   const hasTts = enabledSteps.some((step) => step.kind === "tts");
   const hasFlow = enabledSteps.some((step) => step.kind === "flow") || flow.conversation_flow?.enabled;
   const derivedMode = deriveFlowMode(flow, config);
+  for (const kind of runtimeStepOrder) {
+    const count = enabledSteps.filter((step) => step.kind === kind).length;
+    if (count > 1) errors.push(`Pipeline can only have one enabled ${kind.toUpperCase()} step.`);
+  }
+  let previousOrder = -1;
+  for (const step of enabledSteps) {
+    const order = runtimeStepOrder.indexOf(step.kind);
+    if (order === -1) continue;
+    if (order < previousOrder) {
+      errors.push("Pipeline step order is invalid.");
+      break;
+    }
+    previousOrder = order;
+  }
 
   if (derivedMode === "realtime" && hasFlow) {
     errors.push("Pipecat Flow is only available for composed realtime pipelines.");
@@ -1915,6 +1970,14 @@ function validatePipeline(config, flow) {
   }
   if (derivedMode === "composed" && (!hasStt || !hasTts)) {
     errors.push("Composed pipelines need both STT and TTS steps.");
+  }
+  if (flow.web_search_enabled) {
+    const searchIntegration = config.integrations.find((item) => item.id === "web-search" || item.kind === "web_search");
+    if (!searchIntegration || !searchIntegration.enabled) {
+      errors.push("Web Search integration is disabled.");
+    } else if (secretStatus(searchIntegration, "api_key") === "missing") {
+      errors.push("Web Search API key is missing.");
+    }
   }
 
   for (const step of enabledSteps) {
@@ -1943,8 +2006,12 @@ function validatePipeline(config, flow) {
     ) {
       errors.push(`${integration.name} API key is missing.`);
     }
-    if (integration.kind === "google_cloud_tts" && !integration.credentials_path && secretStatus(integration, "credentials_json") === "missing") {
-      errors.push("Google Cloud TTS credentials are missing.");
+    if (
+      ["google_cloud_tts", "google_streaming_tts"].includes(integration.kind) &&
+      !integration.credentials_path &&
+      secretStatus(integration, "credentials_json") === "missing"
+    ) {
+      errors.push(`${integration.name} credentials are missing.`);
     }
     if (["aws_bedrock", "aws_nova_sonic"].includes(integration.kind)) {
       if (secretStatus(integration, "access_key_id") === "missing" || secretStatus(integration, "secret_key") === "missing") {
@@ -2295,6 +2362,11 @@ function PipelineView({
                 checked={!flow.greeting}
                 onChange={(value) => updateFlow((draft) => ({ ...draft, greeting: value ? "" : defaultFlow.greeting }))}
                 label="No greeting"
+              />
+              <Toggle
+                checked={flow.web_search_enabled}
+                onChange={(value) => updateFlow((draft) => ({ ...draft, web_search_enabled: value }))}
+                label="Expose web search tool"
               />
               <Field label="Greeting" wide>
                 <input
@@ -3270,11 +3342,13 @@ function IntegrationIdentity({ integration, updateIntegration }) {
 function IntegrationRuntimeDefaults({ integration, updateIntegration }) {
   const showLanguage = languageIntegrationKinds.includes(integration.kind);
   const showSpeed = speedIntegrationKinds.includes(integration.kind);
-  if (!showLanguage && !showSpeed) return null;
+  const showTtsStreaming = ttsStreamingIntegrationKinds.includes(integration.kind);
+  if (!showLanguage && !showSpeed && !showTtsStreaming) return null;
   return (
     <SettingsSection title="Runtime defaults">
       {showLanguage && <LanguageSetting integration={integration} updateIntegration={updateIntegration} />}
       {showSpeed && <SpeedSetting integration={integration} updateIntegration={updateIntegration} />}
+      {showTtsStreaming && <TtsStreamingSetting integration={integration} updateIntegration={updateIntegration} />}
     </SettingsSection>
   );
 }
@@ -3440,12 +3514,21 @@ function IntegrationSettings({ integration, config, updateIntegration, modelOpti
     );
   }
 
+  if (integration.kind === "web_search") {
+    return (
+      <SettingsSection title="Web Search" status={secretStatus(integration, "api_key")}>
+        <SecretSetting integration={integration} field="api_key" label="OpenAI API key" updateIntegration={updateIntegration} />
+        <TextSetting integration={integration} field="default_model" label="Search model" updateIntegration={updateIntegration} />
+      </SettingsSection>
+    );
+  }
+
   if (["soniox", "deepgram", "gradium", "speechmatics"].includes(integration.kind)) {
     return (
       <SettingsSection title={kindLabel(integration.kind)} status={secretStatus(integration, "api_key")}>
         <SecretSetting integration={integration} field="api_key" label="API key" updateIntegration={updateIntegration} />
         <TextSetting integration={integration} field="default_model" label="STT model" updateIntegration={updateIntegration} />
-        {integration.kind === "soniox" && (
+        {["soniox", "gradium"].includes(integration.kind) && (
           <TextSetting integration={integration} field="default_voice" label="TTS voice" updateIntegration={updateIntegration} />
         )}
       </SettingsSection>
@@ -3462,10 +3545,10 @@ function IntegrationSettings({ integration, config, updateIntegration, modelOpti
     );
   }
 
-  if (integration.kind === "google_cloud_tts") {
+  if (["google_cloud_tts", "google_streaming_tts"].includes(integration.kind)) {
     return (
       <>
-        <SettingsSection title="Google Cloud TTS" status={secretStatus(integration, "credentials_json")}>
+        <SettingsSection title={kindLabel(integration.kind)} status={secretStatus(integration, "credentials_json")}>
           <TextSetting integration={integration} field="credentials_path" label="Credentials path" updateIntegration={updateIntegration} wide />
           <SecretSetting integration={integration} field="credentials_json" label="Credentials JSON" updateIntegration={updateIntegration} wide />
           <TextSetting integration={integration} field="location" label="Location" updateIntegration={updateIntegration} />
@@ -3632,6 +3715,20 @@ function SpeedSetting({ integration, updateIntegration }) {
   );
 }
 
+function TtsStreamingSetting({ integration, updateIntegration }) {
+  return (
+    <Field label="TTS streaming">
+      <select
+        value={integration.tts_streaming_mode || "sentence"}
+        onChange={(event) => updateIntegration(integration.id, (item) => ({ ...item, tts_streaming_mode: event.target.value }))}
+      >
+        <option value="sentence">Sentence chunks</option>
+        <option value="token">Token chunks</option>
+      </select>
+    </Field>
+  );
+}
+
 function ModelSetting({
   integration,
   field,
@@ -3707,6 +3804,19 @@ function offerPath(config) {
     return appUrl(`api/offer${token ? `?token=${encodeURIComponent(token)}` : ""}`);
   } catch {
     return appUrl("api/offer");
+  }
+}
+
+function browserClientId() {
+  const key = "pipecat-assist-client-id";
+  try {
+    const existing = localStorage.getItem(key);
+    if (existing) return existing;
+    const created = crypto.randomUUID();
+    localStorage.setItem(key, created);
+    return created;
+  } catch {
+    return `browser-${Math.random().toString(16).slice(2)}`;
   }
 }
 
@@ -3940,11 +4050,11 @@ function VoiceTest({ config, flow }) {
             type: "client-ready",
             data: {
               version: "1.4.0",
-              about: {
-                library: "pipecat-assist-ui",
-                library_version: "0.1.27",
-                platform: "browser",
-              },
+                about: {
+                  library: "pipecat-assist-ui",
+                  library_version: "0.1.28",
+                  platform: "browser",
+                },
             },
           }),
         );
@@ -4016,6 +4126,7 @@ function VoiceTest({ config, flow }) {
           request_data: {
             flow_id: flow.id,
             source: "ui_voice_test",
+            client_id: browserClientId(),
           },
         }),
       });
@@ -4213,6 +4324,63 @@ function McpHistoryPanel({ mcpHistory, refreshMcpHistory, clearMcpHistory }) {
   );
 }
 
+function RuntimeSettingsPanel({ config, updateConfig }) {
+  return (
+    <>
+      <div className="panel-head">
+        <div>
+          <h3>Runtime behavior</h3>
+          <span>session memory and MCP schema cache</span>
+        </div>
+      </div>
+      <div className="form-grid">
+        <Toggle
+          checked={config.session_memory_enabled}
+          onChange={(value) => updateConfig((draft) => ({ ...draft, session_memory_enabled: value }))}
+          label="Session memory"
+        />
+        <Field label="Memory reuse">
+          <select
+            value={String(config.session_memory_reuse_seconds ?? 300)}
+            onChange={(event) => updateConfig((draft) => ({ ...draft, session_memory_reuse_seconds: Number(event.target.value) }))}
+          >
+            <option value="0">Off</option>
+            <option value="120">2 minutes</option>
+            <option value="300">5 minutes</option>
+            <option value="900">15 minutes</option>
+            <option value="3600">1 hour</option>
+          </select>
+        </Field>
+        <Field label="Memory messages">
+          <input
+            type="number"
+            min="0"
+            max="100"
+            value={config.session_memory_max_messages ?? 12}
+            onChange={(event) => updateConfig((draft) => ({ ...draft, session_memory_max_messages: Number(event.target.value || 0) }))}
+          />
+        </Field>
+        <Toggle
+          checked={config.mcp_tools_cache_enabled}
+          onChange={(value) => updateConfig((draft) => ({ ...draft, mcp_tools_cache_enabled: value }))}
+          label="MCP tools cache"
+        />
+        <Field label="MCP cache TTL">
+          <select
+            value={String(config.mcp_tools_cache_ttl_seconds ?? 300)}
+            onChange={(event) => updateConfig((draft) => ({ ...draft, mcp_tools_cache_ttl_seconds: Number(event.target.value) }))}
+          >
+            <option value="0">No cache</option>
+            <option value="60">1 minute</option>
+            <option value="300">5 minutes</option>
+            <option value="900">15 minutes</option>
+          </select>
+        </Field>
+      </div>
+    </>
+  );
+}
+
 function RuntimeView({
   config,
   audioDebug,
@@ -4228,6 +4396,8 @@ function RuntimeView({
   return (
     <div className="runtime-home">
       <section className="panel main-panel">
+        <RuntimeSettingsPanel config={config} updateConfig={updateConfig} />
+        <div className="divider" />
         <AudioDebugPanel
           config={config}
           audioDebug={audioDebug}

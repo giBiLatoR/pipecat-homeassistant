@@ -40,17 +40,23 @@ MCP. The default Flow remains pass-through until enabled.
 `Integrations`
 : Configure cloud providers and local AI endpoints, including Gemini, OpenAI,
 Soniox, Deepgram, Cartesia, Gradium, Speechmatics, AWS, ElevenLabs, Google
-Cloud TTS, Azure/OpenAI-compatible APIs, Ollama, local runtimes, and Home
-Assistant MCP. Home Assistant MCP shows Automatic, Manual, or Error state and
-contains the MCP test/reset controls.
+Cloud TTS HTTP, Google Cloud TTS Streaming, Azure/OpenAI-compatible APIs,
+Ollama, local runtimes, Web Search, and Home Assistant MCP. Home Assistant MCP
+shows Automatic, Manual, or Error state and contains the MCP test/reset
+controls.
 
 OpenAI is split intentionally: **OpenAI Realtime** is for native
 speech-to-speech pipelines, while **OpenAI Cloud** is for composed pipelines
 that use separate STT, LLM, and TTS steps.
 
+Gemini is split the same way: **Google Gemini Live** is for native
+speech-to-speech pipelines, while **Google Gemini Cloud** is for composed
+pipelines that use separate STT, LLM, and TTS steps.
+
 `Runtime`
-: Enable audio debug captures and inspect recent Home Assistant MCP calls made
-by the assistant.
+: Tune short-lived session memory, cache the MCP tool schema, enable audio
+debug captures, and inspect recent Home Assistant MCP calls made by the
+assistant.
 
 ### Home Assistant MCP
 
@@ -76,6 +82,28 @@ Open **Runtime > Home Assistant actions** to inspect the recent MCP tools called
 by the assistant. The history is in-memory, capped to recent calls, and intended
 for debugging what the assistant attempted to do in Home Assistant.
 
+### Session memory and web search
+
+Short-lived session memory is enabled by default. It keeps the last few
+messages for a browser or satellite client for a limited time, so reconnecting
+does not immediately lose the conversational context. It is in-memory only and
+is cleared when the add-on restarts.
+
+Web Search is a separate integration. Add an OpenAI API key in
+**Integrations > Web Search**, then enable **Expose web search tool** on the
+pipeline's LLM step. The model can then call a hosted OpenAI Responses API web
+search tool for current public information. Home Assistant device control still
+uses MCP tools.
+
+### Composed realtime latency
+
+Composed realtime pipelines stream audio through STT, LLM, and TTS stages. STT
+must still produce text before the LLM can act on it, but compatible TTS
+providers can synthesize streamed LLM output in chunks. In **Integrations**,
+providers such as Cartesia, ElevenLabs, Soniox, Gradium, and Google Cloud TTS
+Streaming expose a **TTS streaming** setting. `Sentence chunks` is smoother;
+`Token chunks` can reduce latency when the provider handles partial text well.
+
 ## Default Gemini Live setup
 
 Gemini Live is the first-run speech-to-speech pipeline. It receives audio from
@@ -87,16 +115,17 @@ handled through MCP tools.
 3. Open **Integrations > Home Assistant MCP** and select **Test MCP**. A
    healthy result shows the number of available tools. In a normal add-on
    install this uses the Supervisor token automatically.
-4. Open **Integrations > Google Gemini**:
+4. Open **Integrations > Google Gemini Live**:
    - Paste a Google AI Studio API key.
    - Keep `models/gemini-3.1-flash-live-preview` as the realtime model.
-   - Keep `gemini-3.5-flash` as the text model for Home Assistant Assist text
-     tests.
    - Use a Gemini Live voice such as `Charon` or `Puck`.
 5. Open **Pipelines**, then open **Gemini Live Home Assistant**.
-6. Set `Language` if needed, for example `en-US` or `pl-PL`.
-7. Keep the default instructions or adapt them to the household.
-8. Save the pipeline.
+6. Keep the default instructions or adapt them to the household.
+7. Save the pipeline.
+
+For Home Assistant Assist text tests, configure **Google Gemini Cloud** or
+**OpenAI Cloud** as the composed/text provider. Gemini Live itself is a
+speech-to-speech runtime.
 
 ### Browser voice test
 
@@ -159,9 +188,3 @@ Copy or install `custom_components/pipecat_assist` from this repository, then
 add the integration in Home Assistant. Set the add-on URL to
 `http://127.0.0.1:7860` or the Home Assistant LAN URL if the integration cannot
 reach loopback in your installation.
-
-## Branding assets
-
-Home Assistant uses `icon.png` and `logo.png` from this add-on directory in the
-Supervisor app listing. Home Assistant 2026.3 and newer also read the local
-integration brand files from `custom_components/pipecat_assist/brand`.

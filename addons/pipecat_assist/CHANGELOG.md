@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.28
+
+- Added Web Search as a separate integration and optional LLM tool for
+  pipelines.
+- Added short-lived per-client session memory and configurable MCP tool schema
+  caching in Runtime settings.
+- Split Google Cloud TTS into HTTP and Streaming integrations, with chunking
+  controls for compatible streaming TTS providers.
+- Wired composed pipelines to support local Web Search tools together with Home
+  Assistant MCP tools.
+- Tightened VAD semantics so removing the VAD step disables local/provider turn
+  detection configuration instead of leaving a hidden pipeline behavior.
+- Updated docs for Gemini Live, composed realtime latency, Web Search, MCP
+  cache, and session memory.
+
 ## 0.1.27
 
 - Cleaned the pipeline editor inspector so step-specific controls are shown

@@ -18,6 +18,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger
 from starlette.staticfiles import StaticFiles
 
+from pipecat.adapters.schemas.function_schema import FunctionSchema
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
@@ -58,6 +60,7 @@ from app.config import (
     DEFAULT_OPENAI_STT_MODEL,
     DEFAULT_OPENAI_TTS_MODEL,
     DEFAULT_OPENAI_TTS_VOICE,
+    DEFAULT_WEB_SEARCH_MODEL,
     ConfigStore,
     FlowConfig,
     IntegrationConfig,
@@ -74,9 +77,12 @@ from app.mcp_bridge import (
     HomeAssistantMCPBridge,
     check_mcp,
     clear_mcp_call_history,
+    clear_mcp_tools_cache,
     list_mcp_call_history,
 )
+from app.session_memory import SESSION_MEMORY
 from app.text_agent import run_text_conversation
+from app.web_search_tool import web_search_schema
 
 STORE = ConfigStore()
 STARTED_AT = time.time()
@@ -207,6 +213,10 @@ def _static_models_for(integration: IntegrationConfig, capability: str) -> list[
         values = [integration.default_model or DEFAULT_ELEVENLABS_MODEL]
     elif integration.kind == "google_cloud_tts":
         values = [integration.default_voice or DEFAULT_GOOGLE_TTS_VOICE]
+    elif integration.kind == "google_streaming_tts":
+        values = [integration.default_voice or DEFAULT_GOOGLE_TTS_VOICE]
+    elif integration.kind == "web_search":
+        values = [integration.default_model or DEFAULT_WEB_SEARCH_MODEL, DEFAULT_WEB_SEARCH_MODEL]
     elif integration.kind == "aws_nova_sonic":
         values = [integration.default_realtime_model or DEFAULT_AWS_NOVA_SONIC_MODEL]
     elif integration.kind == "aws_bedrock":
@@ -284,8 +294,19 @@ async def api_integration_models(integration_id: str, capability: str = "llm"):
 @app.post("/api/assist/mcp/check")
 async def api_check_mcp(payload: dict[str, Any] | None = None):
     config = STORE.load()
-    flow = config.selected_flow((payload or {}).get("flow_id"))
-    return await check_mcp(config.effective_mcp_url, config.effective_mcp_token, flow.mcp_tool_allowlist)
+    payload = payload or {}
+    flow = config.selected_flow(payload.get("flow_id"))
+    refresh = bool(payload.get("refresh", True))
+    if refresh:
+        clear_mcp_tools_cache()
+    return await check_mcp(
+        config.effective_mcp_url,
+        config.effective_mcp_token,
+        flow.mcp_tool_allowlist,
+        cache_enabled=config.mcp_tools_cache_enabled,
+        cache_ttl_seconds=config.mcp_tools_cache_ttl_seconds,
+        refresh=refresh,
+    )
 
 
 @app.post("/api/assist/mcp/reset")
@@ -396,6 +417,16 @@ def _runtime_speed(flow: FlowConfig, integration: IntegrationConfig | None) -> f
     return float((integration.speed if integration else None) or flow.speed or 1.0)
 
 
+def _tts_text_aggregation_mode(integration: IntegrationConfig | None):
+    if not integration or integration.tts_streaming_mode != "token":
+        return None
+    if integration.kind not in {"cartesia", "elevenlabs", "soniox", "gradium", "google_streaming_tts"}:
+        return None
+    from pipecat.services.tts_service import TextAggregationMode
+
+    return TextAggregationMode.TOKEN
+
+
 def _session_properties(
     flow: FlowConfig,
     tools_schema,
@@ -403,6 +434,7 @@ def _session_properties(
     integration: IntegrationConfig | None = None,
 ) -> SessionProperties:
     tools = tools_schema if tools_schema and tools_schema.standard_tools else None
+    vad_enabled = _enabled_step(flow, "vad") is not None
     return SessionProperties(
         audio=AudioConfiguration(
             input=AudioInput(
@@ -410,8 +442,8 @@ def _session_properties(
                     model=flow.transcription_model,
                     language=_runtime_language(flow, integration),
                 ),
-                turn_detection=_turn_detection(flow),
-                noise_reduction=_noise_reduction(flow),
+                turn_detection=_turn_detection(flow) if vad_enabled else None,
+                noise_reduction=_noise_reduction(flow) if vad_enabled else None,
             ),
             output=AudioOutput(voice=voice or flow.voice, speed=_runtime_speed(flow, integration)),
         ),
@@ -474,6 +506,44 @@ def _require_integration(
         readable = " or ".join(fields)
         raise RuntimeError(f"{integration.name} is missing {readable}")
     return integration
+
+
+def _web_search_tool_schema(config: RuntimeConfig, flow: FlowConfig) -> FunctionSchema | None:
+    """Return the optional web search tool schema for a flow."""
+
+    if not flow.web_search_enabled:
+        return None
+    integration = config.integration("web-search")
+    if not integration or not integration.enabled:
+        return None
+    api_key = (integration.api_key or config.openai_api_key or "").strip()
+    if not api_key:
+        logger.warning("Web search is enabled, but the Web Search integration has no API key")
+        return None
+    model = integration.default_model or DEFAULT_WEB_SEARCH_MODEL
+    return web_search_schema(api_key, model)
+
+
+def _merge_tools_schema(
+    base_schema,
+    extra_tools: list[FunctionSchema] | None = None,
+) -> ToolsSchema | None:
+    """Return one ToolsSchema with MCP and local assistant tools."""
+
+    tools: list[FunctionSchema] = []
+    if base_schema and getattr(base_schema, "standard_tools", None):
+        tools.extend(base_schema.standard_tools)
+    tools.extend(extra_tools or [])
+    return ToolsSchema(standard_tools=tools) if tools else None
+
+
+def _register_local_tool_handlers(llm, tools: list[FunctionSchema]) -> None:
+    """Register local function handlers when the LLM service needs explicit callbacks."""
+
+    for schema in tools:
+        handler = getattr(schema, "handler", None)
+        if handler:
+            llm.register_function(schema.name, handler)
 
 
 def _integration_api_key(
@@ -546,6 +616,21 @@ def _runtime_mode(flow: FlowConfig, provider_kind: str | None = None) -> str:
     if provider_kind == "aws_nova_sonic" or flow.pipeline_template == "aws_nova_sonic":
         return "s2s"
     return "s2s"
+
+
+def _runner_body(runner_args: RunnerArguments) -> dict[str, Any]:
+    body = runner_args.body if isinstance(runner_args.body, dict) else {}
+    request_data = body.get("request_data")
+    return request_data if isinstance(request_data, dict) else body
+
+
+def _session_client_id(runner_args: RunnerArguments, flow: FlowConfig) -> str:
+    body = _runner_body(runner_args)
+    for key in ("client_id", "device_id", "satellite_id", "source"):
+        value = str(body.get(key, "")).strip()
+        if value:
+            return f"{flow.id}:{value}"
+    return f"{flow.id}:default"
 
 
 def _realtime_model_matches_provider(provider_kind: str, model: str) -> bool:
@@ -678,8 +763,9 @@ def _gemini_live_service(
         "system_instruction": flow.instructions,
         "voice": _gemini_voice(flow, integration),
         "language": _runtime_language(flow, integration) or "en-US",
-        "vad": _gemini_vad(flow),
     }
+    if _enabled_step(flow, "vad"):
+        settings_kwargs["vad"] = _gemini_vad(flow)
     if flow.max_output_tokens:
         settings_kwargs["max_tokens"] = flow.max_output_tokens
 
@@ -866,12 +952,14 @@ def _build_tts_service(config: RuntimeConfig, flow: FlowConfig):
     model = _step_model_for(step, integration, "tts")
     voice = _step_voice(step, integration)
     speed = _runtime_speed(flow, integration)
+    text_aggregation_mode = _tts_text_aggregation_mode(integration)
 
     if integration.kind == "cartesia":
         from pipecat.services.cartesia.tts import CartesiaTTSService
 
         return CartesiaTTSService(
             api_key=_integration_api_key(integration, "TTS"),
+            text_aggregation_mode=text_aggregation_mode,
             settings=CartesiaTTSService.Settings(
                 model=model or DEFAULT_CARTESIA_MODEL,
                 voice=voice or DEFAULT_CARTESIA_VOICE,
@@ -882,6 +970,7 @@ def _build_tts_service(config: RuntimeConfig, flow: FlowConfig):
 
         return GradiumTTSService(
             api_key=_integration_api_key(integration, "TTS"),
+            text_aggregation_mode=text_aggregation_mode,
             settings=GradiumTTSService.Settings(
                 model=model or None,
                 voice=voice or None,
@@ -901,11 +990,26 @@ def _build_tts_service(config: RuntimeConfig, flow: FlowConfig):
                 speaking_rate=speed,
             ),
         )
+    if integration.kind == "google_streaming_tts":
+        from pipecat.services.google.tts import GoogleTTSService
+
+        if not integration.credentials_json and not integration.credentials_path:
+            raise RuntimeError("Google Cloud TTS Streaming is missing service account credentials")
+        return GoogleTTSService(
+            credentials=integration.credentials_json or None,
+            credentials_path=integration.credentials_path or None,
+            location=integration.location or None,
+            text_aggregation_mode=text_aggregation_mode,
+            settings=GoogleTTSService.Settings(
+                voice=voice or DEFAULT_GOOGLE_TTS_VOICE,
+            ),
+        )
     if integration.kind == "elevenlabs":
         from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 
         return ElevenLabsTTSService(
             api_key=_integration_api_key(integration, "TTS"),
+            text_aggregation_mode=text_aggregation_mode,
             settings=ElevenLabsTTSService.Settings(
                 model=model or DEFAULT_ELEVENLABS_MODEL,
                 voice=voice or DEFAULT_ELEVENLABS_VOICE,
@@ -928,6 +1032,7 @@ def _build_tts_service(config: RuntimeConfig, flow: FlowConfig):
 
         return SonioxTTSService(
             api_key=_integration_api_key(integration, "TTS"),
+            text_aggregation_mode=text_aggregation_mode,
             settings=SonioxTTSService.Settings(voice=voice or None),
         )
 
@@ -1050,9 +1155,10 @@ async def run_bot(
     integration = config.model_integration(flow)
     provider_kind = integration.kind if integration else flow.provider_id
     runtime_mode = _runtime_mode(flow, provider_kind)
+    client_id = _session_client_id(runner_args, flow)
 
     bridge: HomeAssistantMCPBridge | None = None
-    tools_schema = None
+    mcp_tools_schema = None
     if flow.mcp_enabled and mcp_token:
         bridge = HomeAssistantMCPBridge(
             config.effective_mcp_url,
@@ -1061,9 +1167,12 @@ async def run_bot(
         )
         try:
             await bridge.start()
-            tools_schema = await bridge.tools_schema()
-            if not tools_schema.standard_tools:
-                tools_schema = None
+            mcp_tools_schema = await bridge.tools_schema(
+                cache_enabled=config.mcp_tools_cache_enabled,
+                cache_ttl_seconds=config.mcp_tools_cache_ttl_seconds,
+            )
+            if not mcp_tools_schema.standard_tools:
+                mcp_tools_schema = None
         except asyncio.CancelledError as err:
             logger.warning("Starting without MCP tools after MCP startup was cancelled: {}", err)
             with suppress(Exception):
@@ -1075,6 +1184,9 @@ async def run_bot(
                 await bridge.close()
             bridge = None
 
+    local_tool_schemas = [schema for schema in [_web_search_tool_schema(config, flow)] if schema]
+    tools_schema = _merge_tools_schema(mcp_tools_schema, local_tool_schemas)
+    context_for_memory = None
     audio_debug = None
 
     if runtime_mode == "s2s":
@@ -1128,6 +1240,7 @@ async def run_bot(
                 integration=integration,
                 tools_schema=tools_schema,
             )
+        _register_local_tool_handlers(llm, local_tool_schemas)
 
         logger.info(
             "Starting {} speech-to-speech model {} for flow {}",
@@ -1136,19 +1249,27 @@ async def run_bot(
             flow.id,
         )
 
-        if bridge and tools_schema:
-            await bridge.register_tools_schema(tools_schema, llm)
+        if bridge and mcp_tools_schema:
+            await bridge.register_tools_schema(mcp_tools_schema, llm)
 
         greeting_messages = (
             [{"role": "developer", "content": flow.greeting}]
             if flow.greeting.strip()
             else []
         )
-        context = (
-            LLMContext(greeting_messages, tools_schema)
-            if tools_schema
-            else LLMContext(greeting_messages)
+        context_messages = SESSION_MEMORY.restore(
+            client_id,
+            greeting_messages,
+            enabled=config.session_memory_enabled,
+            reuse_seconds=config.session_memory_reuse_seconds,
+            max_messages=config.session_memory_max_messages,
         )
+        context = (
+            LLMContext(context_messages, tools_schema)
+            if tools_schema
+            else LLMContext(context_messages)
+        )
+        context_for_memory = context
         user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
             context,
             realtime_service_mode=True,
@@ -1200,6 +1321,7 @@ async def run_bot(
 
         stt = _build_stt_service(config, flow)
         llm = _build_llm_service(config, flow, tools_schema=tools_schema)
+        _register_local_tool_handlers(llm, local_tool_schemas)
         tts = _build_tts_service(config, flow)
 
         _, stt_integration = _step_integration(config, flow, "stt")
@@ -1223,7 +1345,15 @@ async def run_bot(
         context_messages = [{"role": "developer", "content": flow.instructions}]
         if flow.greeting.strip():
             context_messages.append({"role": "developer", "content": flow.greeting})
+        context_messages = SESSION_MEMORY.restore(
+            client_id,
+            context_messages,
+            enabled=config.session_memory_enabled,
+            reuse_seconds=config.session_memory_reuse_seconds,
+            max_messages=config.session_memory_max_messages,
+        )
         context = LLMContext(context_messages, active_tools_schema) if active_tools_schema else LLMContext(context_messages)
+        context_for_memory = context
         vad_step = _enabled_step(flow, "vad")
         vad_processor = VADProcessor(vad_analyzer=_composed_vad_analyzer(flow)) if vad_step else None
         if vad_step:
@@ -1239,8 +1369,8 @@ async def run_bot(
         else:
             context_aggregator = LLMContextAggregatorPair(context)
 
-        if bridge and tools_schema and not _flow_enabled(flow):
-            await bridge.register_tools_schema(tools_schema, llm)
+        if bridge and mcp_tools_schema and not _flow_enabled(flow):
+            await bridge.register_tools_schema(mcp_tools_schema, llm)
 
         if _flow_enabled(flow):
             initial_flow_node = _flow_node_configs(flow, bridge)
@@ -1301,6 +1431,13 @@ async def run_bot(
         await runner.add_workers(worker)
         await runner.run()
     finally:
+        if context_for_memory:
+            SESSION_MEMORY.cache(
+                client_id,
+                context_for_memory,
+                enabled=config.session_memory_enabled,
+                max_messages=config.session_memory_max_messages,
+            )
         if bridge:
             await bridge.close()
         if audio_debug:
@@ -1312,7 +1449,7 @@ async def bot(runner_args: RunnerArguments):
     """Pipecat runner entry point."""
 
     config = STORE.load()
-    body = runner_args.body if isinstance(runner_args.body, dict) else {}
+    body = _runner_body(runner_args)
     flow = config.selected_flow(body.get("flow_id"))
     transport = await create_transport(runner_args, _transport_params(flow))
     await run_bot(transport, runner_args, config, flow, mcp_token=config.effective_mcp_token)
