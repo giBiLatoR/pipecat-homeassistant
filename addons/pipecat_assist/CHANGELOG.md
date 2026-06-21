@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.54
+
+- Added Speechmatics to the Home Assistant Assist STT bridge so composed
+  pipelines with a Speechmatics STT step no longer fall back to OpenAI Cloud.
+- Added a Speechmatics realtime WebSocket STT bridge for HA Assist streaming
+  microphone input, including partial and final transcript handling.
+
 ## 0.1.53
 
 - Added a Home Assistant frontend compatibility guard that fills a missing

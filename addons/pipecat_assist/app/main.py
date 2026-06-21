@@ -55,6 +55,7 @@ from app.config import (
     DEFAULT_AWS_NOVA_SONIC_VOICE,
     DEFAULT_CARTESIA_MODEL,
     DEFAULT_CARTESIA_VOICE,
+    DEFAULT_DEEPGRAM_MODEL,
     DEFAULT_ELEVENLABS_MODEL,
     DEFAULT_ELEVENLABS_VOICE,
     DEFAULT_GEMINI_LIVE_MODEL,
@@ -69,6 +70,7 @@ from app.config import (
     DEFAULT_OPENAI_STT_MODEL,
     DEFAULT_OPENAI_TTS_MODEL,
     DEFAULT_OPENAI_TTS_VOICE,
+    DEFAULT_SPEECHMATICS_MODEL,
     DEFAULT_WEB_SEARCH_MODEL,
     ConfigStore,
     FlowConfig,
@@ -110,7 +112,7 @@ TTS_MEDIA_TYPES = {
     "pcm": "audio/L16",
     "wav": "audio/wav",
 }
-HA_STT_BRIDGE_KINDS = {"deepgram", "gemini", "gemini_cloud", "openai", "openai_cloud"}
+HA_STT_BRIDGE_KINDS = {"deepgram", "gemini", "gemini_cloud", "openai", "openai_cloud", "speechmatics"}
 HA_TTS_BRIDGE_KINDS = {"elevenlabs", "gemini", "gemini_cloud", "openai", "openai_cloud"}
 PROVIDER_RETRY_STATUSES = {429, 500, 502, 503, 504}
 TTS_PREFETCH_TTL_SECONDS = 90
@@ -783,9 +785,9 @@ async def _transcribe_audio_bytes(
 ) -> dict[str, str]:
     step, integration = _ha_assist_step_integration(config, flow, "stt", HA_STT_BRIDGE_KINDS)
     if not integration:
-        raise _bridge_unavailable("STT", "Google Gemini, OpenAI Cloud, OpenAI Realtime, or Deepgram")
+        raise _bridge_unavailable("STT", "Google Gemini, OpenAI Cloud, OpenAI Realtime, Deepgram, or Speechmatics")
     integration = _require_integration(integration, "STT", fields=())
-    model = _step_model_for(step, integration, "stt", DEFAULT_OPENAI_STT_MODEL)
+    model = _step_model_for(step, integration, "stt", _ha_stt_model_fallback(integration))
     if not audio:
         raise HTTPException(status_code=400, detail="No audio was provided")
     stt_audio, stt_content_type = _audio_for_cloud_stt_metadata(audio, metadata, content_type)
@@ -864,9 +866,26 @@ async def _transcribe_audio_bytes(
         )
         return {"text": str(transcript).strip()}
 
+    if integration.kind == "speechmatics":
+        async def request_speechmatics_stt() -> str:
+            queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+            await queue.put(audio)
+            await queue.put(None)
+            return await _speechmatics_transcribe_stream(
+                websocket=None,
+                queue=queue,
+                integration=integration,
+                flow=flow,
+                model=model,
+                metadata=metadata,
+            )
+
+        transcript = await _provider_call("Speechmatics STT", request_speechmatics_stt)
+        return {"text": transcript.strip()}
+
     raise HTTPException(
         status_code=400,
-        detail=f"HA Assist STT bridge does not support {integration.name}. Use Gemini, OpenAI Cloud, OpenAI Realtime, or Deepgram STT.",
+        detail=f"HA Assist STT bridge does not support {integration.name}. Use Gemini, OpenAI Cloud, OpenAI Realtime, Deepgram, or Speechmatics STT.",
     )
 
 
@@ -994,9 +1013,9 @@ async def api_stt_stream(websocket: WebSocket):
 
         step, integration = _ha_assist_step_integration(config, flow, "stt", HA_STT_BRIDGE_KINDS)
         if not integration:
-            raise _bridge_unavailable("STT", "Google Gemini, OpenAI Cloud, OpenAI Realtime, or Deepgram")
+            raise _bridge_unavailable("STT", "Google Gemini, OpenAI Cloud, OpenAI Realtime, Deepgram, or Speechmatics")
         integration = _require_integration(integration, "STT", fields=())
-        model = _step_model_for(step, integration, "stt", DEFAULT_OPENAI_STT_MODEL)
+        model = _step_model_for(step, integration, "stt", _ha_stt_model_fallback(integration))
         streaming_kind = _streaming_stt_kind(integration, model)
         logger.info(
             "HA Assist STT selected flow={} integration={} kind={} model={} mode={}",
@@ -1632,10 +1651,24 @@ def _streaming_stt_kind(integration: IntegrationConfig | None, model: str) -> st
         return ""
     if integration.kind == "deepgram":
         return "deepgram"
+    if integration.kind == "speechmatics":
+        return "speechmatics"
     if integration.kind in {"openai", "openai_cloud"}:
         if "realtime" in (model or "") or "realtime" in (integration.default_stt_model or ""):
             return "openai_realtime"
     return ""
+
+
+def _ha_stt_model_fallback(integration: IntegrationConfig | None) -> str:
+    if not integration:
+        return ""
+    if integration.kind in {"openai", "openai_cloud"}:
+        return DEFAULT_OPENAI_STT_MODEL
+    if integration.kind == "deepgram":
+        return DEFAULT_DEEPGRAM_MODEL
+    if integration.kind == "speechmatics":
+        return integration.default_model or DEFAULT_SPEECHMATICS_MODEL
+    return integration.default_model or ""
 
 
 def _openai_realtime_transcription_model(flow: FlowConfig, model: str) -> str:
@@ -2385,6 +2418,123 @@ async def _deepgram_transcribe_stream(
         return " ".join(final_parts).strip() or latest_partial.strip()
 
 
+def _speechmatics_transcript_text(data: dict[str, Any]) -> str:
+    metadata = data.get("metadata") or {}
+    transcript = str(metadata.get("transcript") or data.get("transcript") or "").strip()
+    if transcript:
+        return transcript
+
+    parts: list[str] = []
+    for result in data.get("results") or []:
+        alternatives = result.get("alternatives") or []
+        content = str((alternatives[0] if alternatives else {}).get("content") or "").strip()
+        if not content:
+            continue
+        if result.get("type") == "punctuation" and parts:
+            parts[-1] = f"{parts[-1]}{content}"
+        else:
+            parts.append(content)
+    return " ".join(parts).strip()
+
+
+def _speechmatics_model(model: str, integration: IntegrationConfig) -> str:
+    candidate = (model or integration.default_stt_model or integration.default_model or DEFAULT_SPEECHMATICS_MODEL).strip()
+    return candidate if candidate in {"standard", "enhanced", "melia-1"} else DEFAULT_SPEECHMATICS_MODEL
+
+
+async def _speechmatics_transcribe_stream(
+    *,
+    websocket: WebSocket | None,
+    queue: "asyncio.Queue[bytes | None]",
+    integration: IntegrationConfig,
+    flow: FlowConfig,
+    model: str,
+    metadata: dict[str, Any],
+) -> str:
+    api_key = _integration_api_key(integration, "STT")
+    sample_rate = int(_ws_metadata_value(metadata, "sample_rate", DEFAULT_HA_STT_SAMPLE_RATE) or DEFAULT_HA_STT_SAMPLE_RATE)
+    language = (
+        _normalize_language_hint(str(_ws_metadata_value(metadata, "language", "")))
+        or _normalize_language_hint(_runtime_language(flow, integration))
+        or "en"
+    )
+    stt_model = _speechmatics_model(model, integration)
+    start_message = {
+        "message": "StartRecognition",
+        "audio_format": {
+            "type": "raw",
+            "encoding": "pcm_s16le",
+            "sample_rate": sample_rate,
+        },
+        "transcription_config": {
+            "language": language,
+            "model": stt_model,
+            "enable_partials": True,
+            "max_delay": 0.7,
+            "max_delay_mode": "fixed",
+            "conversation_config": {"end_of_utterance_silence_trigger": 0.2},
+        },
+    }
+
+    url = "wss://eu.rt.speechmatics.com/v2"
+    logger.info(
+        "HA Assist Speechmatics STT streaming started integration={} model={} language={} sample_rate={}",
+        integration.name,
+        stt_model,
+        language,
+        sample_rate,
+    )
+
+    async with _websocket_connect(url, {"Authorization": f"Bearer {api_key}"}) as provider_ws:
+        await provider_ws.send(json.dumps(start_message))
+
+        async def sender() -> None:
+            seq_no = 0
+            while True:
+                chunk = await queue.get()
+                if chunk is None:
+                    break
+                payload = _pcm_stream_payload(chunk)
+                if not payload:
+                    continue
+                await provider_ws.send(payload)
+                seq_no += 1
+            await provider_ws.send(
+                json.dumps({"message": "EndOfStream", "last_seq_no": max(seq_no - 1, 0)})
+            )
+
+        sender_task = asyncio.create_task(sender())
+        final_parts: list[str] = []
+        latest_partial = ""
+        try:
+            async with asyncio.timeout(45):
+                async for raw in provider_ws:
+                    data = json.loads(raw)
+                    message = str(data.get("message") or "")
+                    if message in {"RecognitionStarted", "AudioAdded", "Info"}:
+                        continue
+                    if message == "AddPartialTranscript":
+                        latest_partial = _speechmatics_transcript_text(data)
+                        if latest_partial and websocket:
+                            await _send_ws_json(websocket, {"type": "partial", "text": latest_partial})
+                        continue
+                    if message == "AddTranscript":
+                        transcript = _speechmatics_transcript_text(data)
+                        if transcript:
+                            final_parts.append(transcript)
+                        continue
+                    if message == "EndOfTranscript":
+                        break
+                    if message == "Error":
+                        raise RuntimeError(data.get("reason") or data.get("type") or "Speechmatics STT failed")
+        finally:
+            sender_task.cancel()
+            with suppress(Exception):
+                await sender_task
+
+    return " ".join(final_parts).strip() or latest_partial.strip()
+
+
 async def _streaming_transcribe_audio(
     *,
     websocket: WebSocket,
@@ -2412,6 +2562,15 @@ async def _streaming_transcribe_audio(
             websocket=websocket,
             queue=queue,
             integration=integration,
+            model=model,
+            metadata=metadata,
+        )
+    if kind == "speechmatics":
+        return await _speechmatics_transcribe_stream(
+            websocket=websocket,
+            queue=queue,
+            integration=integration,
+            flow=flow,
             model=model,
             metadata=metadata,
         )
