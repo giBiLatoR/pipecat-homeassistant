@@ -86,7 +86,7 @@ from app.audio_debug import (
     list_audio_recordings,
 )
 from app.mcp_bridge import (
-    HomeAssistantMCPBridge,
+    CombinedMCPBridge,
     check_mcp,
     clear_mcp_call_history,
     clear_mcp_tools_cache,
@@ -681,7 +681,7 @@ async def api_integration_models(integration_id: str, capability: str = "llm"):
                     continue
                 if integration.kind == "gemini" and capability != "realtime":
                     continue
-                models.append(name)
+                models.append(name.removeprefix("models/") if integration.kind == "gemini" else name)
             if models:
                 return {"ok": True, "models": [{"id": item, "label": item} for item in sorted(models)]}
     except Exception as err:
@@ -757,19 +757,23 @@ async def api_conversation(payload: dict[str, Any]):
         except Exception as err:
             raise HTTPException(
                 status_code=502,
-                detail=f"Gemini Live HA Assist conversation failed: {err}",
+                detail=f"Pipecat Live Bridge conversation failed: {err}",
             ) from err
         if live_result:
-            live_result["continue_conversation"] = True
+            live_result["continue_conversation"] = not _should_end_conversation(
+                text,
+                str(live_result.get("speech") or ""),
+            )
             logger.info(
-                "HA Assist conversation served from Gemini Live flow={} input={} speech={} total_ms={:.0f}",
+                "HA Assist conversation served from Pipecat Live Bridge flow={} input={} speech={} continue={} total_ms={:.0f}",
                 flow.id,
                 _text_fingerprint(text),
                 _text_fingerprint(str(live_result.get("speech") or "")),
+                live_result["continue_conversation"],
                 (time.perf_counter() - started_at) * 1000,
             )
             return live_result
-        raise HTTPException(status_code=502, detail="Gemini Live HA Assist conversation returned no speech")
+        raise HTTPException(status_code=502, detail="Pipecat Live Bridge conversation returned no speech")
 
     async def request():
         result = await run_text_conversation(
@@ -780,7 +784,10 @@ async def api_conversation(payload: dict[str, Any]):
             flow_id=flow.id,
             mcp_token=config.effective_mcp_token,
         )
-        result["continue_conversation"] = not bool(result.get("error"))
+        result["continue_conversation"] = (
+            not bool(result.get("error"))
+            and not _should_end_conversation(text, str(result.get("speech") or ""))
+        )
         if not result.get("error"):
             _start_tts_prefetch(
                 config=config,
@@ -799,6 +806,99 @@ async def api_conversation(payload: dict[str, Any]):
         return result
 
     return await _provider_call("HA Assist conversation", request, attempts=1)
+
+
+def _json_from_model_text(text: str) -> Any:
+    """Parse JSON from a model answer that should contain only JSON."""
+
+    clean = text.strip()
+    if clean.startswith("```"):
+        clean = clean.strip("`")
+        if clean.lower().startswith("json"):
+            clean = clean[4:].strip()
+    try:
+        return json.loads(clean)
+    except json.JSONDecodeError:
+        pass
+
+    start = clean.find("{")
+    end = clean.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            return json.loads(clean[start : end + 1])
+        except json.JSONDecodeError as err:
+            raise ValueError("Model did not return valid JSON") from err
+    start = clean.find("[")
+    end = clean.rfind("]")
+    if start >= 0 and end > start:
+        try:
+            return json.loads(clean[start : end + 1])
+        except json.JSONDecodeError as err:
+            raise ValueError("Model did not return valid JSON") from err
+    raise ValueError("Model did not return valid JSON")
+
+
+def _ai_task_prompt(payload: dict[str, Any]) -> str:
+    task_name = str(payload.get("task_name") or "AI Task").strip()
+    instructions = str(payload.get("instructions") or "").strip()
+    fields = payload.get("structure_fields") if isinstance(payload.get("structure_fields"), list) else []
+    if not fields:
+        return f"Task: {task_name}\n\n{instructions}"
+
+    field_lines = []
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        required = "required" if field.get("required") else "optional"
+        description = str(field.get("description") or "").strip()
+        name = str(field.get("name") or "").strip()
+        selector = str(field.get("selector") or "").strip()
+        detail = f"{name} ({required})"
+        extras = ", ".join(part for part in (description, selector) if part)
+        field_lines.append(f"- {detail}: {extras}" if extras else f"- {detail}")
+
+    return (
+        f"Task: {task_name}\n\n"
+        f"{instructions}\n\n"
+        "Return only a JSON object for Home Assistant AI Tasks. "
+        "Do not include markdown, commentary, or code fences. Fields:\n"
+        + "\n".join(field_lines)
+    )
+
+
+@app.post("/api/assist/ai-task")
+async def api_ai_task(payload: dict[str, Any]):
+    """Run a Home Assistant AI Task through the selected Pipecat Assist text model."""
+
+    config = STORE.load()
+    flow = config.selected_flow(payload.get("flow_id"))
+    text = _ai_task_prompt(payload)
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="instructions are required")
+
+    result = await run_text_conversation(
+        config,
+        text=text,
+        language=payload.get("language"),
+        conversation_id=payload.get("conversation_id"),
+        flow_id=flow.id,
+        mcp_token=config.effective_mcp_token,
+    )
+    if result.get("error"):
+        raise HTTPException(status_code=502, detail=result.get("speech") or result.get("error"))
+
+    speech = str(result.get("speech") or "").strip()
+    data: Any = speech
+    if payload.get("structured"):
+        try:
+            data = _json_from_model_text(speech)
+        except ValueError as err:
+            raise HTTPException(status_code=502, detail=str(err)) from err
+
+    return {
+        "conversation_id": result.get("conversation_id") or payload.get("conversation_id"),
+        "data": data,
+    }
 
 
 async def _transcribe_audio_bytes(
@@ -1010,9 +1110,9 @@ async def _handle_ha_live_stt_stream(
 
     transcript = await _wait_for_ha_live_transcript(turn)
     if turn.error:
-        raise HTTPException(status_code=502, detail=f"Gemini Live HA Assist bridge failed: {turn.error}")
+        raise HTTPException(status_code=502, detail=f"Pipecat Live Bridge failed: {turn.error}")
     if not transcript:
-        raise HTTPException(status_code=502, detail="Gemini Live HA Assist bridge returned no transcript")
+        raise HTTPException(status_code=502, detail="Pipecat Live Bridge returned no transcript")
 
     await websocket.send_json({"type": "final", "text": transcript.strip()})
     await websocket.close()
@@ -1049,7 +1149,7 @@ async def api_stt_stream(websocket: WebSocket):
         )
         live_integration = _ha_live_bridge_integration(config, flow, metadata)
         if live_integration:
-            logger.info("HA Assist STT using Gemini Live bridge for flow {}", flow.id)
+            logger.info("HA Assist STT using Pipecat Live Bridge for flow {}", flow.id)
             await _handle_ha_live_stt_stream(
                 websocket=websocket,
                 config=config,
@@ -1182,6 +1282,40 @@ def _text_fingerprint(text: str) -> str:
     clean = text.strip()
     digest = hashlib.sha1(clean.encode("utf-8")).hexdigest()[:10]
     return f"len={len(clean)} sha1={digest}"
+
+
+def _should_end_conversation(*texts: str | None) -> bool:
+    """Return true when the user or assistant clearly closes the conversation."""
+
+    phrases = (
+        "to wszystko",
+        "dziękuję to wszystko",
+        "dziekuje to wszystko",
+        "koniec rozmowy",
+        "kończymy rozmowę",
+        "konczymy rozmowe",
+        "ok koniec",
+        "okej koniec",
+        "dzięki koniec",
+        "dzieki koniec",
+        "that is all",
+        "that's all",
+        "thanks that's all",
+        "thank you that's all",
+        "end conversation",
+        "stop listening",
+        "we are done",
+        "goodbye",
+        "bye for now",
+    )
+    for text in texts:
+        clean = str(text or "").strip().lower()
+        if not clean:
+            continue
+        compact = " ".join(clean.replace(".", " ").replace(",", " ").replace("!", " ").split())
+        if any(phrase in compact for phrase in phrases):
+            return True
+    return False
 
 
 def _prune_tts_prefetch() -> None:
@@ -1606,12 +1740,16 @@ async def _synthesize_tts_audio(
             "Content-Type": "application/json",
             "Accept": "audio/mpeg",
         }
+        body: dict[str, Any] = {"text": text, "model_id": model or DEFAULT_ELEVENLABS_MODEL}
+        if speed and abs(speed - 1.0) > 0.001:
+            body["voice_settings"] = {"speed": speed}
+
         async def request_elevenlabs_tts() -> httpx.Response:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
                     url,
                     headers=headers,
-                    json={"text": text, "model_id": model or DEFAULT_ELEVENLABS_MODEL},
+                    json=body,
                 )
                 response.raise_for_status()
                 return response
@@ -1792,12 +1930,12 @@ async def api_tts(payload: dict[str, Any]):
         except Exception as err:
             raise HTTPException(
                 status_code=502,
-                detail=f"Gemini Live HA Assist TTS failed: {err}",
+                detail=f"Pipecat Live Bridge TTS failed: {err}",
             ) from err
         if live_audio:
             audio, media_type, extension = live_audio
             logger.info(
-                "HA Assist TTS served from Gemini Live flow={} text={} requested_format={} output={} bytes={} total_ms={:.0f}",
+                "HA Assist TTS served from Pipecat Live Bridge flow={} text={} requested_format={} output={} bytes={} total_ms={:.0f}",
                 flow.id,
                 _text_fingerprint(text),
                 response_format,
@@ -1806,7 +1944,7 @@ async def api_tts(payload: dict[str, Any]):
                 (time.perf_counter() - started_at) * 1000,
             )
             return Response(content=audio, media_type=media_type, headers={"X-Audio-Extension": extension})
-        raise HTTPException(status_code=502, detail="Gemini Live HA Assist TTS returned no audio")
+        raise HTTPException(status_code=502, detail="Pipecat Live Bridge TTS returned no audio")
 
     _prune_tts_prefetch()
     cached = _pop_tts_prefetch(flow.id, text, response_format)
@@ -2186,7 +2324,7 @@ def _ha_live_bridge_integration(
     channels = int(_ws_metadata_value(metadata, "channel", DEFAULT_HA_STT_CHANNELS) or DEFAULT_HA_STT_CHANNELS)
     if bit_rate != 16 or channels != 1 or "pcm" not in codec:
         logger.info(
-            "Skipping Gemini Live HA Assist bridge for flow {} because HA audio is {} Hz, {} bit, {} channel, codec={}",
+            "Skipping Pipecat Live Bridge for flow {} because HA audio is {} Hz, {} bit, {} channel, codec={}",
             flow.id,
             sample_rate,
             bit_rate,
@@ -2220,7 +2358,7 @@ def _gemini_live_ha_setup(
                 {
                     "text": (
                         f"{_effective_instructions(flow)}\n\n"
-                        "You are running inside Home Assistant Assist through a Gemini Live bridge. "
+                        "You are running inside Home Assistant Assist through Pipecat Live Bridge. "
                         "Use Home Assistant tools silently for explicit smart-home requests, "
                         "then answer briefly and naturally."
                     )
@@ -2246,13 +2384,10 @@ async def _warm_mcp_tools_schema(
     config: RuntimeConfig,
     flow: FlowConfig,
 ) -> ToolsSchema | None:
-    if not flow.mcp_enabled or not config.effective_mcp_token:
+    mcp_servers = config.enabled_mcp_servers(config.effective_mcp_token) if flow.mcp_enabled else []
+    if not mcp_servers:
         return None
-    bridge = HomeAssistantMCPBridge(
-        config.effective_mcp_url,
-        config.effective_mcp_token,
-        flow.mcp_tool_allowlist,
-    )
+    bridge = CombinedMCPBridge(mcp_servers, flow.mcp_tool_allowlist)
     try:
         await bridge.start()
         tools = await bridge.tools_schema(
@@ -2279,7 +2414,7 @@ async def _warm_gemini_live_ha_setup(
 ) -> None:
     api_key = _integration_api_key(
         integration,
-        "Gemini Live HA Assist warmup",
+        "Pipecat Live Bridge warmup",
         os.getenv("GOOGLE_API_KEY", ""),
     )
     url = (
@@ -2301,7 +2436,7 @@ async def _warm_gemini_live_ha_setup(
                 if message.get("error"):
                     raise RuntimeError(_gemini_live_error_message(message))
     logger.info(
-        "HA Assist warmup completed Gemini Live setup flow={} model={} duration_ms={:.0f}",
+        "HA Assist warmup completed Pipecat Live Bridge setup flow={} model={} duration_ms={:.0f}",
         flow.id,
         _model_name(flow, integration, "gemini"),
         (time.perf_counter() - started_at) * 1000,
@@ -2410,7 +2545,7 @@ async def _call_local_live_tool(schema: FunctionSchema, arguments: dict[str, Any
 async def _call_gemini_live_tool(
     *,
     function_call: dict[str, Any],
-    bridge: HomeAssistantMCPBridge | None,
+    bridge: CombinedMCPBridge | None,
     local_tools: dict[str, FunctionSchema],
     mcp_tool_names: set[str],
 ) -> dict[str, Any]:
@@ -2427,7 +2562,7 @@ async def _call_gemini_live_tool(
             result = f"Unknown tool: {name}"
         return {"id": call_id, "name": name, "response": {"result": result}}
     except Exception as err:
-        logger.warning("Gemini Live HA Assist tool {} failed: {}", name, err)
+        logger.warning("Pipecat Live Bridge tool {} failed: {}", name, err)
         return {"id": call_id, "name": name, "response": {"error": str(err)}}
 
 
@@ -2460,7 +2595,7 @@ async def _handle_gemini_live_message(
     provider_ws,
     message: dict[str, Any],
     turn: HALiveTurn,
-    bridge: HomeAssistantMCPBridge | None,
+    bridge: CombinedMCPBridge | None,
     local_tools: dict[str, FunctionSchema],
     mcp_tool_names: set[str],
 ) -> str:
@@ -2564,17 +2699,14 @@ async def _run_gemini_live_ha_turn(
     input_sample_rate: int,
 ) -> None:
     started_at = time.perf_counter()
-    bridge: HomeAssistantMCPBridge | None = None
+    bridge: CombinedMCPBridge | None = None
     mcp_tools_schema: ToolsSchema | None = None
     try:
         local_tool_schemas = [schema for schema in [_web_search_tool_schema(config, flow)] if schema]
         local_tools = {schema.name: schema for schema in local_tool_schemas}
-        if flow.mcp_enabled and config.effective_mcp_token:
-            bridge = HomeAssistantMCPBridge(
-                config.effective_mcp_url,
-                config.effective_mcp_token,
-                flow.mcp_tool_allowlist,
-            )
+        mcp_servers = config.enabled_mcp_servers(config.effective_mcp_token) if flow.mcp_enabled else []
+        if mcp_servers:
+            bridge = CombinedMCPBridge(mcp_servers, flow.mcp_tool_allowlist)
             try:
                 await bridge.start()
                 mcp_tools_schema = await bridge.tools_schema(
@@ -2582,17 +2714,16 @@ async def _run_gemini_live_ha_turn(
                     cache_ttl_seconds=config.mcp_tools_cache_ttl_seconds,
                 )
             except Exception as err:
-                logger.warning("Starting Gemini Live HA Assist bridge without MCP tools: {}", err)
                 with suppress(Exception):
                     await bridge.close()
-                bridge = None
+                raise RuntimeError(f"MCP tools are enabled but unavailable: {err}") from err
         tools_schema = _merge_tools_schema(mcp_tools_schema, local_tool_schemas)
         mcp_tool_names = {
             tool.name for tool in (mcp_tools_schema.standard_tools if mcp_tools_schema else [])
         }
         api_key = _integration_api_key(
             integration,
-            "Gemini Live HA Assist",
+            "Pipecat Live Bridge",
             os.getenv("GOOGLE_API_KEY", ""),
         )
         url = (
@@ -2640,7 +2771,7 @@ async def _run_gemini_live_ha_turn(
         _remember_ha_live_speech(turn)
         turn.transcript_ready.set()
         logger.info(
-            "Gemini Live HA Assist turn finished flow={} completion={} transcript={} speech={} audio_bytes={} duration_ms={:.0f}",
+            "Pipecat Live Bridge turn finished flow={} completion={} transcript={} speech={} audio_bytes={} duration_ms={:.0f}",
             flow.id,
             completion_reason or "unknown",
             _text_fingerprint(turn.transcript),
@@ -2650,7 +2781,7 @@ async def _run_gemini_live_ha_turn(
         )
     except Exception as err:
         turn.error = str(err)
-        logger.warning("Gemini Live HA Assist bridge failed for flow {}: {}", flow.id, err)
+        logger.warning("Pipecat Live Bridge failed for flow {}: {}", flow.id, err)
     finally:
         if not turn.transcript_ready.is_set():
             turn.transcript_ready.set()
@@ -2704,9 +2835,9 @@ async def _ha_live_conversation_result(
     return {
         "speech": turn.speech.strip(),
         "conversation_id": conversation_id,
-        "continue_conversation": True,
+        "continue_conversation": not _should_end_conversation(turn.transcript, turn.speech),
         "error": "",
-        "source": "gemini_live_ha_bridge",
+        "source": "pipecat_live_bridge",
     }
 
 
@@ -3573,10 +3704,10 @@ def _composed_vad_analyzer(flow: FlowConfig):
     from pipecat.audio.vad.vad_analyzer import VADParams
 
     stop_secs_by_eagerness = {
-        "high": 0.25,
-        "medium": 0.45,
-        "auto": 0.45,
-        "low": 0.7,
+        "high": 0.2,
+        "medium": 0.2,
+        "auto": 0.2,
+        "low": 0.2,
     }
     return SileroVADAnalyzer(
         params=VADParams(
@@ -3903,7 +4034,7 @@ def _flow_enabled(flow: FlowConfig) -> bool:
     return bool(flow.conversation_flow.get("enabled"))
 
 
-def _flow_node_configs(flow: FlowConfig, bridge: HomeAssistantMCPBridge | None):
+def _flow_node_configs(flow: FlowConfig, bridge: CombinedMCPBridge | None):
     from pipecat_flows import FlowsFunctionSchema
 
     nodes = flow.conversation_flow.get("nodes") or []
@@ -4019,14 +4150,11 @@ async def run_bot(
     client_id = _session_client_id(runner_args, flow)
     language_override = str(session_body.get("language") or "").strip() or None
 
-    bridge: HomeAssistantMCPBridge | None = None
+    bridge: CombinedMCPBridge | None = None
     mcp_tools_schema = None
-    if flow.mcp_enabled and mcp_token:
-        bridge = HomeAssistantMCPBridge(
-            config.effective_mcp_url,
-            mcp_token,
-            flow.mcp_tool_allowlist,
-        )
+    mcp_servers = config.enabled_mcp_servers(mcp_token) if flow.mcp_enabled else []
+    if mcp_servers:
+        bridge = CombinedMCPBridge(mcp_servers, flow.mcp_tool_allowlist)
         try:
             await bridge.start()
             mcp_tools_schema = await bridge.tools_schema(
@@ -4036,15 +4164,15 @@ async def run_bot(
             if not mcp_tools_schema.standard_tools:
                 mcp_tools_schema = None
         except asyncio.CancelledError as err:
-            logger.warning("Starting without MCP tools after MCP startup was cancelled: {}", err)
             with suppress(Exception):
                 await bridge.close()
             bridge = None
+            raise RuntimeError(f"MCP tools are enabled but startup was cancelled: {err}") from err
         except Exception as err:
-            logger.warning("Starting without MCP tools: {}", err)
             with suppress(Exception):
                 await bridge.close()
             bridge = None
+            raise RuntimeError(f"MCP tools are enabled but unavailable: {err}") from err
 
     local_tool_schemas = [schema for schema in [_web_search_tool_schema(config, flow)] if schema]
     tools_schema = _merge_tools_schema(mcp_tools_schema, local_tool_schemas)
@@ -4223,7 +4351,7 @@ async def run_bot(
                 context,
                 user_params=LLMUserAggregatorParams(
                     user_turn_strategies=UserTurnStrategies(
-                        stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=0.7)]
+                        stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=0.2)]
                     ),
                     user_turn_stop_timeout=2.0,
                 ),

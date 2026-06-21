@@ -8,11 +8,13 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Sequence
+from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 from loguru import logger
+from pipecat.adapters.schemas.function_schema import FunctionSchema
 from mcp.client.session_group import StreamableHttpParameters
 
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
@@ -142,13 +144,26 @@ class RecordingMCPClient(MCPClient):
         await result_callback(response)
 
 
+def _tool_prefix(value: str) -> str:
+    prefix = "".join(char if char.isalnum() else "_" for char in value.lower()).strip("_")
+    return prefix or "mcp"
+
+
 class HomeAssistantMCPBridge:
     """Small wrapper around Pipecat's MCPClient."""
 
-    def __init__(self, url: str, token: str, tool_allowlist: Sequence[str] | None = None):
+    def __init__(
+        self,
+        url: str,
+        token: str = "",
+        tool_allowlist: Sequence[str] | None = None,
+        *,
+        name: str = "Home Assistant MCP",
+    ):
         self.url = url
         self.token = token
         self.tool_allowlist = list(tool_allowlist or [])
+        self.name = name
         self.client: MCPClient | None = None
 
     async def __aenter__(self) -> "HomeAssistantMCPBridge":
@@ -161,29 +176,29 @@ class HomeAssistantMCPBridge:
     async def start(self) -> None:
         """Connect to Home Assistant MCP."""
 
-        if not self.token:
-            raise RuntimeError("Home Assistant MCP token is not configured")
         if self.client:
             return
         await self._preflight_auth()
+        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
         self.client = RecordingMCPClient(
             server_params=StreamableHttpParameters(
                 url=self.url,
-                headers={"Authorization": f"Bearer {self.token}"},
+                headers=headers,
             ),
             tools_filter=self.tool_allowlist or None,
         )
         await self.client.start()
-        logger.info("Connected to Home Assistant MCP at {}", self.url)
+        logger.info("Connected to {} at {}", self.name, self.url)
 
     async def _preflight_auth(self) -> None:
         """Detect auth failures before MCPClient starts background tasks."""
 
         headers = {
-            "Authorization": f"Bearer {self.token}",
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
         }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
         payload = {"jsonrpc": "2.0", "id": "pipecat-assist-preflight", "method": "ping"}
 
         try:
@@ -240,7 +255,7 @@ class HomeAssistantMCPBridge:
             and cached
             and (cache_ttl_seconds <= 0 or now - cached[1] <= cache_ttl_seconds)
         ):
-            logger.debug("Using cached Home Assistant MCP tool schema for {}", self.url)
+            logger.debug("Using cached MCP tool schema for {} at {}", self.name, self.url)
             return cached[0]
 
         tools = await self.client.get_tools_schema()
@@ -276,6 +291,140 @@ class HomeAssistantMCPBridge:
             _finish_history_item(history_item, started, ok=False, error=str(err))
             raise
 
+
+
+class CombinedMCPBridge:
+    """Expose multiple MCP servers as one tool surface."""
+
+    def __init__(
+        self,
+        servers: Sequence[dict[str, Any]],
+        tool_allowlist: Sequence[str] | None = None,
+    ):
+        self.server_specs = list(servers)
+        self.tool_allowlist = list(tool_allowlist or [])
+        self.bridges: list[tuple[dict[str, Any], HomeAssistantMCPBridge]] = []
+        self._tool_routes: dict[str, tuple[HomeAssistantMCPBridge, str]] = {}
+        self._tools_schema: ToolsSchema | None = None
+
+    async def __aenter__(self) -> "CombinedMCPBridge":
+        await self.start()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.close()
+
+    async def start(self) -> None:
+        """Connect all configured MCP servers."""
+
+        if self.bridges:
+            return
+        errors: list[str] = []
+        for spec in self.server_specs:
+            bridge = HomeAssistantMCPBridge(
+                str(spec.get("url") or ""),
+                str(spec.get("token") or ""),
+                self.tool_allowlist,
+                name=str(spec.get("name") or spec.get("id") or "MCP Server"),
+            )
+            try:
+                await bridge.start()
+            except Exception as err:
+                errors.append(f"{bridge.name}: {err}")
+                with suppress(Exception):
+                    await bridge.close()
+                continue
+            self.bridges.append((spec, bridge))
+
+        if errors:
+            for _, bridge in self.bridges:
+                with suppress(Exception):
+                    await bridge.close()
+            self.bridges = []
+            raise RuntimeError("; ".join(errors))
+        if not self.bridges:
+            raise RuntimeError("; ".join(errors) or "No MCP servers are configured")
+
+    async def close(self) -> None:
+        """Close all MCP connections."""
+
+        bridges = self.bridges
+        self.bridges = []
+        self._tool_routes = {}
+        self._tools_schema = None
+        for _, bridge in bridges:
+            with suppress(Exception):
+                await bridge.close()
+
+    async def tools_schema(
+        self,
+        *,
+        cache_enabled: bool = True,
+        cache_ttl_seconds: int = 300,
+        refresh: bool = False,
+    ) -> ToolsSchema:
+        """Return a combined Pipecat tools schema."""
+
+        if not self.bridges:
+            raise RuntimeError("MCP bridge is not started")
+
+        public_tools: list[FunctionSchema] = []
+        routes: dict[str, tuple[HomeAssistantMCPBridge, str]] = {}
+        seen: set[str] = set()
+
+        for spec, bridge in self.bridges:
+            schema = await bridge.tools_schema(
+                cache_enabled=cache_enabled,
+                cache_ttl_seconds=cache_ttl_seconds,
+                refresh=refresh,
+            )
+            prefix = _tool_prefix(str(spec.get("id") or bridge.name))
+            prefer_unprefixed = bool(spec.get("prefer_unprefixed"))
+            for tool in schema.standard_tools:
+                original_name = tool.name
+                public_name = original_name
+                if not prefer_unprefixed or public_name in seen:
+                    public_name = f"{prefix}__{original_name}"
+                if public_name in seen:
+                    public_name = f"{prefix}_{len(seen)}__{original_name}"
+                seen.add(public_name)
+                routes[public_name] = (bridge, original_name)
+                public_tools.append(
+                    FunctionSchema(
+                        name=public_name,
+                        description=f"{bridge.name}: {tool.description}",
+                        properties=tool.properties,
+                        required=tool.required,
+                    )
+                )
+
+        self._tool_routes = routes
+        self._tools_schema = ToolsSchema(standard_tools=public_tools)
+        return self._tools_schema
+
+    async def register_tools_schema(self, tools: ToolsSchema, llm: LLMService) -> None:
+        """Register combined MCP callbacks with an LLM service."""
+
+        if not self._tool_routes:
+            await self.tools_schema()
+
+        for public_name in self._tool_routes:
+            async def handler(params, *, name=public_name) -> None:
+                result = await self.call_tool(name, dict(params.arguments or {}))
+                await params.result_callback(result)
+
+            llm.register_function(public_name, handler)
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
+        """Call a routed MCP tool."""
+
+        if not self._tool_routes:
+            await self.tools_schema()
+        route = self._tool_routes.get(name)
+        if not route:
+            raise RuntimeError(f"Unknown MCP tool: {name}")
+        bridge, original_name = route
+        return await bridge.call_tool(original_name, arguments)
 
 
 async def check_mcp(

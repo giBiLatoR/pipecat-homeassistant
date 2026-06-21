@@ -193,7 +193,7 @@ const API = {
 
 const REDACTED = "__redacted__";
 const GEMINI_TEXT_MODEL = "gemini-2.5-flash";
-const GEMINI_LIVE_MODEL = "models/gemini-3.1-flash-live-preview";
+const GEMINI_LIVE_MODEL = "gemini-3.1-flash-live-preview";
 const GEMINI_LIVE_VOICE = "Charon";
 const OPENAI_TEXT_MODEL = "gpt-5.4-mini";
 const OPENAI_REALTIME_MODEL = "gpt-realtime-2";
@@ -248,9 +248,19 @@ const providerKinds = [
   ["local_runtime", "Local runtime", Cpu],
   ["web_search", "Web Search", Search],
   ["home_assistant_mcp", "Home Assistant MCP", Home],
+  ["ha_mcp", "HA MCP Server Add-on", Home],
+  ["mcp_server", "Custom MCP Server", Server],
 ];
 
-const protectedIntegrationIds = ["gemini", "gemini-cloud", "openai", "openai-cloud", "ha-mcp", "web-search"];
+const protectedIntegrationIds = [
+  "gemini",
+  "gemini-cloud",
+  "openai",
+  "openai-cloud",
+  "ha-mcp",
+  "ha-mcp-server",
+  "web-search",
+];
 
 const languageIntegrationKinds = [
   "gemini",
@@ -289,7 +299,7 @@ const stepProviders = {
   stt: ["soniox", "deepgram", "speechmatics", "gradium", "openai_cloud", "openai", "gemini_cloud", "gemini", "local_runtime"],
   llm: ["openai_cloud", "gemini_cloud", "aws_bedrock", "anthropic", "azure_openai", "openai_compatible", "ollama"],
   tts: ["cartesia", "gradium", "google_cloud_tts", "google_streaming_tts", "elevenlabs", "openai_cloud", "openai", "gemini_cloud", "gemini", "soniox", "local_runtime"],
-  tools: ["home_assistant_mcp"],
+  tools: ["home_assistant_mcp", "ha_mcp", "mcp_server"],
   web_search: ["web_search"],
   output: ["gemini", "openai", "aws_nova_sonic"],
 };
@@ -1366,6 +1376,9 @@ function integrationSummary(integration, config = null) {
   if (integration.kind === "home_assistant_mcp") {
     return config ? mcpMode(config).label : "Automatic";
   }
+  if (["ha_mcp", "mcp_server"].includes(integration.kind)) {
+    return integration.base_url || integration.endpoint || "URL missing";
+  }
   if (integration.kind === "web_search") {
     const provider = config?.integrations?.find((item) => item.id === integration.provider_id);
     return provider ? `via ${provider.name}` : "provider missing";
@@ -2078,6 +2091,8 @@ function pipelineReadiness(config, flow) {
         "aws_nova_sonic",
         "ollama",
         "local_runtime",
+        "ha_mcp",
+        "mcp_server",
       ].includes(
         integration.kind,
       ) &&
@@ -2168,6 +2183,13 @@ function validatePipeline(config, flow) {
 
   for (const step of enabledSteps) {
     if (!["stt", "llm", "web_search", "tts", "tools", "output"].includes(step.kind)) continue;
+    if (step.kind === "tools") {
+      const hasMcp = config.integrations.some(
+        (item) => ["home_assistant_mcp", "ha_mcp", "mcp_server"].includes(item.kind) && item.enabled,
+      );
+      if (!hasMcp) errors.push("Tools step needs at least one enabled MCP integration.");
+      continue;
+    }
     if (!step.integration_id) {
       if (step.kind !== "output") errors.push(`${step.label} needs an integration.`);
       continue;
@@ -3491,15 +3513,27 @@ function IntegrationsView({
             <h3>{selectedIntegration.name}</h3>
             <span>{selectedIntegration.kind === "home_assistant_mcp" ? mcpMode(config).label : kindLabel(selectedIntegration.kind)}</span>
           </div>
-          <Button
-            icon={Trash2}
-            variant="danger"
-            onClick={() => deleteIntegration(selectedIntegration.id)}
-            disabled={protectedIntegrationIds.includes(selectedIntegration.id)}
-          />
+          <div className="integration-head-actions">
+            <Toggle
+              checked={selectedIntegration.enabled}
+              onChange={(value) => updateIntegration(selectedIntegration.id, (item) => ({ ...item, enabled: value }))}
+              label={selectedIntegration.enabled ? t("Enabled") : "Disabled"}
+            />
+            {!protectedIntegrationIds.includes(selectedIntegration.id) && (
+              <Button
+                icon={Trash2}
+                variant="danger"
+                onClick={() => deleteIntegration(selectedIntegration.id)}
+              />
+            )}
+          </div>
         </div>
 
-        <IntegrationIdentity integration={selectedIntegration} updateIntegration={updateIntegration} />
+        {!protectedIntegrationIds.includes(selectedIntegration.id) && (
+          <SettingsSection>
+            <TextSetting integration={selectedIntegration} field="name" label={t("Name")} updateIntegration={updateIntegration} />
+          </SettingsSection>
+        )}
         <IntegrationSettings
           integration={selectedIntegration}
           config={config}
@@ -3520,32 +3554,6 @@ function IntegrationsView({
           </Button>
         </div>
       </section>
-    </div>
-  );
-}
-
-function IntegrationIdentity({ integration, updateIntegration }) {
-  return (
-    <div className="settings-section">
-      <div className="section-title">
-        <strong>Identity</strong>
-        <span>{integration.enabled ? "enabled" : "disabled"}</span>
-      </div>
-      <div className="form-grid">
-        <div className="wide">
-          <Toggle
-            checked={integration.enabled}
-            onChange={(value) => updateIntegration(integration.id, (item) => ({ ...item, enabled: value }))}
-            label={t("Enabled")}
-          />
-        </div>
-        <Field label={t("Name")}>
-          <input
-            value={integration.name}
-            onChange={(event) => updateIntegration(integration.id, (item) => ({ ...item, name: event.target.value }))}
-          />
-        </Field>
-      </div>
     </div>
   );
 }
@@ -3780,6 +3788,18 @@ function IntegrationSettings({ integration, config, updateIntegration, modelOpti
     );
   }
 
+  if (["ha_mcp", "mcp_server"].includes(integration.kind)) {
+    return (
+      <SettingsSection title={kindLabel(integration.kind)}>
+        <TextSetting integration={integration} field="base_url" label="MCP server URL" updateIntegration={updateIntegration} wide />
+        <SecretSetting integration={integration} field="token" label="Bearer token" updateIntegration={updateIntegration} wide />
+        <div className="empty-state wide">
+          Enable multiple MCP integrations to expose all of their tools to Pipecat Assist. Home Assistant MCP keeps original tool names; additional servers are prefixed automatically.
+        </div>
+      </SettingsSection>
+    );
+  }
+
   if (integration.kind === "web_search") {
     return <WebSearchSettings integration={integration} config={config} updateIntegration={updateIntegration} modelOptions={modelOptions} loadModelOptions={loadModelOptions} />;
   }
@@ -3926,13 +3946,30 @@ function IntegrationSettings({ integration, config, updateIntegration, modelOpti
 function SettingsSection({ title, status, children }) {
   return (
     <div className="settings-section">
-      <div className="section-title">
-        <strong>{title}</strong>
-        {status && <span>{status}</span>}
-      </div>
+      {(title || status) && (
+        <div className="section-title">
+          {title && <strong>{title}</strong>}
+          {status && <span>{status}</span>}
+        </div>
+      )}
       <div className="form-grid">{children}</div>
     </div>
   );
+}
+
+function modelFieldValue(integration, field) {
+  const value = integration[field] || "";
+  if (integration.kind === "gemini" && field === "default_realtime_model") {
+    return value.replace(/^models\//, "");
+  }
+  return value;
+}
+
+function modelFieldUpdateValue(integration, field, value) {
+  if (integration.kind === "gemini" && field === "default_realtime_model") {
+    return value.replace(/^models\//, "");
+  }
+  return value;
 }
 
 function TextSetting({ integration, field, label, updateIntegration, wide = false }) {
@@ -3940,8 +3977,13 @@ function TextSetting({ integration, field, label, updateIntegration, wide = fals
     <Field label={label} wide={wide}>
       <input
         autoComplete="off"
-        value={integration[field] || ""}
-        onChange={(event) => updateIntegration(integration.id, (item) => ({ ...item, [field]: event.target.value }))}
+        value={modelFieldValue(integration, field)}
+        onChange={(event) =>
+          updateIntegration(integration.id, (item) => ({
+            ...item,
+            [field]: modelFieldUpdateValue(integration, field, event.target.value),
+          }))
+        }
       />
     </Field>
   );
@@ -4008,9 +4050,14 @@ function ModelSetting({
       <input
         autoComplete="off"
         list={listId}
-        value={integration[field] || ""}
+        value={modelFieldValue(integration, field)}
         onFocus={() => loadModelOptions?.(integration.id, capability)}
-        onChange={(event) => updateIntegration(integration.id, (item) => ({ ...item, [field]: event.target.value }))}
+        onChange={(event) =>
+          updateIntegration(integration.id, (item) => ({
+            ...item,
+            [field]: modelFieldUpdateValue(integration, field, event.target.value),
+          }))
+        }
       />
       <datalist id={listId}>
         {options.map((model) => (
@@ -4342,7 +4389,7 @@ function VoiceTest({ config, flow }) {
               version: "1.4.0",
                 about: {
                   library: "pipecat-assist-ui",
-                  library_version: "0.1.55",
+                  library_version: "0.1.56",
                   platform: "browser",
                 },
             },

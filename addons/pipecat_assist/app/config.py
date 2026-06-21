@@ -22,7 +22,7 @@ DEFAULT_INSTRUCTIONS = (
 )
 
 DEFAULT_GEMINI_TEXT_MODEL = "gemini-2.5-flash"
-DEFAULT_GEMINI_LIVE_MODEL = "models/gemini-3.1-flash-live-preview"
+DEFAULT_GEMINI_LIVE_MODEL = "gemini-3.1-flash-live-preview"
 DEFAULT_GEMINI_LIVE_VOICE = "Charon"
 DEFAULT_GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
 LEGACY_GEMINI_TTS_MODELS = {
@@ -140,6 +140,8 @@ class IntegrationConfig(BaseModel):
         "local_runtime",
         "web_search",
         "home_assistant_mcp",
+        "ha_mcp",
+        "mcp_server",
     ]
     enabled: bool = False
     api_key: str = ""
@@ -367,6 +369,13 @@ def default_integrations() -> list[IntegrationConfig]:
             base_url=os.getenv("HA_MCP_URL", ""),
             token=os.getenv("LONGLIVED_TOKEN", ""),
         ),
+        IntegrationConfig(
+            id="ha-mcp-server",
+            name="HA MCP Server Add-on",
+            kind="ha_mcp",
+            enabled=False,
+            base_url=os.getenv("HA_MCP_SERVER_URL", ""),
+        ),
     ]
 
 
@@ -504,7 +513,7 @@ class FlowConfig(BaseModel):
 class RuntimeConfig(BaseModel):
     """Persisted runtime configuration edited by the web UI."""
 
-    version: int = 17
+    version: int = 18
     openai_api_key: str = ""
     text_model: str = DEFAULT_GEMINI_TEXT_MODEL
     ha_mcp_url: str = ""
@@ -577,9 +586,26 @@ class RuntimeConfig(BaseModel):
         """Return the Home Assistant MCP integration."""
 
         return next(
+            (
+                item
+                for item in self.integrations
+                if item.kind == "home_assistant_mcp" and item.id == "ha-mcp"
+            ),
+            None,
+        ) or next(
             (item for item in self.integrations if item.kind == "home_assistant_mcp"),
             None,
         )
+
+    @property
+    def mcp_integrations(self) -> list[IntegrationConfig]:
+        """Return enabled MCP server integrations."""
+
+        return [
+            item
+            for item in self.integrations
+            if item.enabled and item.kind in {"home_assistant_mcp", "ha_mcp", "mcp_server"}
+        ]
 
     @property
     def effective_mcp_url(self) -> str:
@@ -620,6 +646,41 @@ class RuntimeConfig(BaseModel):
         if os.getenv("SUPERVISOR_TOKEN"):
             return "supervisor"
         return ""
+
+    def enabled_mcp_servers(self, token_override: str = "") -> list[dict[str, Any]]:
+        """Return enabled MCP server connection specs."""
+
+        servers: list[dict[str, Any]] = []
+        for integration in self.mcp_integrations:
+            if integration.kind == "home_assistant_mcp":
+                url = self.effective_mcp_url
+                token = token_override or self.effective_mcp_token
+                if not _is_http_url(url):
+                    continue
+                servers.append(
+                    {
+                        "id": integration.id,
+                        "name": integration.name,
+                        "url": url,
+                        "token": token,
+                        "prefer_unprefixed": True,
+                    }
+                )
+                continue
+
+            url = (integration.base_url or integration.endpoint or "").strip()
+            if not _is_http_url(url):
+                continue
+            servers.append(
+                {
+                    "id": integration.id,
+                    "name": integration.name,
+                    "url": url,
+                    "token": (integration.token or integration.api_key or "").strip(),
+                    "prefer_unprefixed": False,
+                }
+            )
+        return servers
 
     def public_dict(self) -> dict[str, Any]:
         """Return configuration safe enough for the UI."""
@@ -1062,6 +1123,9 @@ def _repair_provider_defaults(config: RuntimeConfig) -> bool:
                 DEFAULT_GEMINI_LIVE_MODEL,
             )
             changed = True
+        if gemini.default_realtime_model.startswith("models/"):
+            gemini.default_realtime_model = gemini.default_realtime_model.removeprefix("models/")
+            changed = True
         if not _is_voice_for_provider("gemini", gemini.default_voice):
             gemini.default_voice = os.getenv("GEMINI_LIVE_VOICE", DEFAULT_GEMINI_LIVE_VOICE)
             changed = True
@@ -1173,6 +1237,18 @@ def _repair_provider_defaults(config: RuntimeConfig) -> bool:
             changed = True
         if os.getenv("OPENAI_API_KEY") and not web_search.api_key:
             web_search.api_key = os.getenv("OPENAI_API_KEY", "")
+            changed = True
+
+    ha_mcp_server = config.integration("ha-mcp-server")
+    if ha_mcp_server:
+        if ha_mcp_server.name != "HA MCP Server Add-on":
+            ha_mcp_server.name = "HA MCP Server Add-on"
+            changed = True
+        if ha_mcp_server.kind != "ha_mcp":
+            ha_mcp_server.kind = "ha_mcp"
+            changed = True
+        if os.getenv("HA_MCP_SERVER_URL") and not ha_mcp_server.base_url:
+            ha_mcp_server.base_url = os.getenv("HA_MCP_SERVER_URL", "")
             changed = True
 
     provider_defaults = {
@@ -1388,6 +1464,11 @@ class ConfigStore:
 
         if config.version < 17:
             config.version = 17
+            changed = _repair_provider_defaults(config) or changed
+            changed = True
+
+        if config.version < 18:
+            config.version = 18
             changed = _repair_provider_defaults(config) or changed
             changed = True
 

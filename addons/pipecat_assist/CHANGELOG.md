@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.56
+
+- Added a Home Assistant AI Tasks entity backed by the selected Pipecat Assist
+  text pipeline.
+- Added a separate HA MCP Server add-on integration, custom MCP server
+  integrations, and multi-server MCP routing with prefixed tool names.
+- Updated the Lovelace card with live transcript slots, a richer voice UI, and
+  end-of-conversation detection.
+- Renamed HA Assist bridge logs to Pipecat Live Bridge, tightened composed VAD
+  stop timing, and applied ElevenLabs speed to HA Assist TTS.
+- Simplified integration settings by moving enable/delete controls into the
+  header, hiding built-in deletes, and normalizing Gemini model names.
+
 ## 0.1.55
 
 - Expanded the Home Assistant Assist bridge so explicit STT/TTS pipeline steps
@@ -83,7 +96,7 @@
   completing the bridge on Gemini Live `generationComplete` instead of waiting
   for `turnComplete`, which can include the model's simulated realtime playback
   delay.
-- Gemini Live HA Assist bridge responses now set `continue_conversation=true`
+- Pipecat Live Bridge responses now set `continue_conversation=true`
   so Home Assistant frontends that support continuous conversation can resume
   listening after the answer.
 - Added the Gemini Live completion reason to HA Assist bridge logs.

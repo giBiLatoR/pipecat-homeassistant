@@ -374,6 +374,26 @@ h3 {
   gap: 16px;
 }
 
+.integration-editor .section-title {
+  display: none;
+}
+
+.integration-head-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.integration-head-actions .toggle {
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--soft);
+}
+
 .settings-section {
   display: grid;
   gap: 12px;

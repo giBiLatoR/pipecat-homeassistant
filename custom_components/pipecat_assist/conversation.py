@@ -107,5 +107,5 @@ class PipecatAssistConversationEntity(conversation.ConversationEntity):
         return conversation.ConversationResult(
             response=response,
             conversation_id=data.get("conversation_id") or user_input.conversation_id,
-            continue_conversation=not had_error,
+            continue_conversation=bool(data.get("continue_conversation", not had_error)),
         )

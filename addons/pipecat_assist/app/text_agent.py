@@ -18,7 +18,7 @@ from app.config import (
     DEFAULT_WEB_SEARCH_MODEL,
     RuntimeConfig,
 )
-from app.mcp_bridge import HomeAssistantMCPBridge
+from app.mcp_bridge import CombinedMCPBridge
 from app.web_search_tool import WEB_SEARCH_TOOL_NAME, run_gemini_web_search, run_openai_web_search
 
 
@@ -279,13 +279,10 @@ async def run_text_conversation(
     if web_search:
         tools.append(web_search[0])
 
-    bridge: HomeAssistantMCPBridge | None = None
-    if flow.mcp_enabled and mcp_token:
-        bridge = HomeAssistantMCPBridge(
-            config.effective_mcp_url,
-            mcp_token,
-            flow.mcp_tool_allowlist,
-        )
+    bridge: CombinedMCPBridge | None = None
+    mcp_servers = config.enabled_mcp_servers(mcp_token) if flow.mcp_enabled else []
+    if mcp_servers:
+        bridge = CombinedMCPBridge(mcp_servers, flow.mcp_tool_allowlist)
         try:
             await bridge.start()
             tools_schema = await bridge.tools_schema(

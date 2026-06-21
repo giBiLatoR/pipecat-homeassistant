@@ -1,4 +1,4 @@
-const PIPECAT_ASSIST_CARD_VERSION = "0.1.55";
+const PIPECAT_ASSIST_CARD_VERSION = "0.1.56";
 const HA_ASSIST_SAMPLE_RATE_FALLBACK = 48000;
 const OPUS_AUDIO_QUALITY_PARAMS = {
   minptime: "20",
@@ -8,6 +8,45 @@ const OPUS_AUDIO_QUALITY_PARAMS = {
   usedtx: "0",
 };
 const OPUS_AUDIO_REMOVE_PARAMS = new Set(["stereo", "sprop-stereo"]);
+const END_CONVERSATION_PHRASES = [
+  "to wszystko",
+  "koniec rozmowy",
+  "ok koniec",
+  "okej koniec",
+  "that is all",
+  "that's all",
+  "end conversation",
+  "stop listening",
+  "we are done",
+  "goodbye",
+];
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function appendTranscript(existing, chunk) {
+  const text = String(chunk || "").trim();
+  if (!text) return existing || "";
+  if (!existing) return text;
+  if (text.startsWith(existing)) return text;
+  if (existing.endsWith(text)) return existing;
+  if (existing.endsWith(" ") || existing.endsWith("\n") || /^[,.;:!?)]/.test(text)) return `${existing}${text}`;
+  if (/[a-z0-9]$/i.test(existing) && /^[a-z0-9]/i.test(text)) {
+    return `${existing} ${text}`;
+  }
+  return `${existing}${text}`;
+}
+
+function shouldEndConversation(text) {
+  const clean = String(text || "").toLowerCase().replace(/[.,!?]/g, " ").replace(/\s+/g, " ").trim();
+  return END_CONVERSATION_PHRASES.some((phrase) => clean.includes(phrase));
+}
 
 function rememberAudioSampleRate(value) {
   const sampleRate = Number(value || 0);
@@ -115,6 +154,9 @@ class PipecatAssistCard extends HTMLElement {
     this.detail = "Ready";
     this.remoteStream = undefined;
     this.audioBlocked = false;
+    this.userTranscript = "";
+    this.assistantTranscript = "";
+    this.partialTranscript = "";
     this.render();
   }
 
@@ -264,6 +306,9 @@ class PipecatAssistCard extends HTMLElement {
     try {
       this.state = "requesting";
       this.detail = "Waiting for microphone permission";
+      this.userTranscript = "";
+      this.assistantTranscript = "";
+      this.partialTranscript = "";
       this.render();
       this.resetAudioElement();
       await this.waitForAudioSessionRelease();
@@ -281,6 +326,7 @@ class PipecatAssistCard extends HTMLElement {
       else peer.addTransceiver("audio", { direction: "sendrecv" });
 
       this.channel = peer.createDataChannel("signalling");
+      this.channel.onmessage = (event) => this.handleRealtimeMessage(event.data);
       this.channel.onopen = () => {
         this.channel.send(JSON.stringify({
           label: "rtvi-ai",
@@ -356,6 +402,68 @@ class PipecatAssistCard extends HTMLElement {
     }
   }
 
+  textFromEvent(data) {
+    if (!data || typeof data !== "object") return "";
+    const nested = data.data && typeof data.data === "object" ? data.data : {};
+    return String(
+      data.text
+      || data.transcript
+      || data.message
+      || data.content
+      || data.delta
+      || nested.text
+      || nested.transcript
+      || nested.message
+      || nested.content
+      || nested.delta
+      || "",
+    );
+  }
+
+  handleRealtimeMessage(raw) {
+    if (typeof raw !== "string" || !raw.trim().startsWith("{")) return;
+    let message;
+    try {
+      message = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    const type = String(message.type || message.event || message.name || "").toLowerCase();
+    const label = String(message.label || "").toLowerCase();
+    const text = this.textFromEvent(message);
+    if (!text) return;
+
+    const userEvent =
+      type.includes("user") ||
+      type.includes("input") ||
+      type.includes("transcription") && !type.includes("bot") && !type.includes("assistant");
+    const assistantEvent =
+      type.includes("assistant") ||
+      type.includes("bot") ||
+      type.includes("output") ||
+      type.includes("llm") ||
+      label.includes("bot");
+    const finalEvent = type.includes("final") || message.data?.final || message.is_final || message.final;
+
+    if (userEvent && !assistantEvent) {
+      this.userTranscript = finalEvent ? appendTranscript(this.userTranscript, text) : appendTranscript("", text);
+      this.partialTranscript = finalEvent ? "" : text;
+      this.render();
+      if (finalEvent && shouldEndConversation(this.userTranscript)) {
+        window.setTimeout(() => this.stop(), 450);
+      }
+      return;
+    }
+
+    if (assistantEvent) {
+      this.assistantTranscript = appendTranscript(this.assistantTranscript, text);
+      this.render();
+      if (shouldEndConversation(this.assistantTranscript)) {
+        window.setTimeout(() => this.stop(), 650);
+      }
+    }
+  }
+
   attachAudio() {
     if (!this.audio || !this.remoteStream) return;
     if (this.audio.srcObject !== this.remoteStream) this.audio.srcObject = this.remoteStream;
@@ -378,16 +486,45 @@ class PipecatAssistCard extends HTMLElement {
     if (!this.shadowRoot) return;
     const running = ["requesting", "connecting", "connected"].includes(this.state);
     const needsAudioTap = running && this.audioBlocked;
+    const userText = this.partialTranscript || this.userTranscript || "Say something to Pipecat Assist.";
+    const assistantText = this.assistantTranscript || (running ? "Listening..." : "Ready when you are.");
     this.shadowRoot.innerHTML = `
       <style>
         ha-card {
           display: block;
-          padding: 18px;
           overflow: hidden;
+          border-radius: 18px;
+          background:
+            radial-gradient(circle at 50% 100%, rgba(32, 105, 255, 0.72), transparent 44%),
+            radial-gradient(circle at 50% 120%, rgba(111, 178, 255, 0.75), transparent 38%),
+            linear-gradient(145deg, #07182a 0%, #07111f 52%, #05080d 100%);
+          color: #f7fbff;
+          box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
         }
         .wrap {
           display: grid;
-          gap: 14px;
+          min-height: 300px;
+          gap: 18px;
+          padding: 22px;
+          position: relative;
+          overflow: hidden;
+        }
+        .wrap::before {
+          content: "";
+          position: absolute;
+          left: 50%;
+          bottom: -120px;
+          width: 520px;
+          height: 220px;
+          transform: translateX(-50%);
+          border-radius: 50%;
+          border: 2px solid rgba(152, 191, 255, 0.55);
+          box-shadow: 0 0 28px rgba(84, 145, 255, 0.9), inset 0 0 30px rgba(84, 145, 255, 0.28);
+          pointer-events: none;
+        }
+        .head, .actions, .transcript, .wave {
+          position: relative;
+          z-index: 1;
         }
         .head {
           display: flex;
@@ -399,47 +536,65 @@ class PipecatAssistCard extends HTMLElement {
           margin: 0;
           font-size: 18px;
           line-height: 1.2;
+          color: #ffffff;
         }
         .status {
           display: grid;
           gap: 4px;
-          color: var(--secondary-text-color);
+          color: rgba(226, 239, 255, 0.74);
           font-size: 13px;
         }
-        .bars {
+        .transcript {
           display: grid;
-          grid-template-columns: repeat(7, 1fr);
-          align-items: end;
-          height: 54px;
-          gap: 5px;
-          padding: 12px;
-          border-radius: 10px;
-          background: var(--secondary-background-color);
+          gap: 8px;
+          min-height: 92px;
+          max-width: 92%;
+          font-size: 18px;
+          line-height: 1.35;
+          text-shadow: 0 1px 16px rgba(0, 0, 0, 0.35);
         }
-        .bars span {
+        .transcript .user {
+          color: rgba(226, 239, 255, 0.68);
+        }
+        .transcript .assistant {
+          color: #ffffff;
+          font-weight: 700;
+        }
+        .wave {
+          height: 84px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          filter: drop-shadow(0 0 12px rgba(73, 152, 255, 0.9));
+        }
+        .wave span {
           display: block;
-          height: 18px;
+          width: 58px;
+          height: 2px;
+          margin-left: -12px;
           border-radius: 999px;
-          background: var(--primary-color);
-          opacity: 0.45;
-          animation: ${running ? "pulse 900ms ease-in-out infinite" : "none"};
+          background: linear-gradient(90deg, transparent, rgba(191, 225, 255, 0.96), rgba(35, 120, 255, 0.95), transparent);
+          transform: translateY(var(--y)) rotate(var(--r));
+          animation: ${running ? "wave 1800ms ease-in-out infinite" : "none"};
           animation-delay: var(--delay);
         }
-        @keyframes pulse {
-          0%, 100% { height: 14px; opacity: 0.35; }
-          50% { height: 42px; opacity: 0.95; }
+        @keyframes wave {
+          0%, 100% { transform: translateY(var(--y)) rotate(var(--r)) scaleX(0.72); opacity: 0.35; }
+          50% { transform: translateY(var(--yn)) rotate(var(--rn)) scaleX(1.22); opacity: 1; }
         }
         button {
-          min-height: 40px;
+          min-height: 52px;
+          min-width: 52px;
           border: 0;
-          border-radius: 8px;
-          padding: 0 14px;
-          color: var(--text-primary-color, white);
-          background: ${running ? "var(--error-color)" : "var(--primary-color)"};
+          border-radius: 999px;
+          padding: 0 18px;
+          color: ${running ? "#ffffff" : "#07111f"};
+          background: ${running ? "#d94b40" : "#ffffff"};
           font: inherit;
           font-weight: 700;
           cursor: pointer;
-          transition: transform 140ms ease, filter 140ms ease;
+          box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
+          transition: transform 140ms ease, filter 140ms ease, box-shadow 140ms ease;
         }
         .actions {
           display: flex;
@@ -447,13 +602,14 @@ class PipecatAssistCard extends HTMLElement {
           gap: 8px;
           flex-wrap: wrap;
           justify-content: flex-end;
+          align-self: end;
         }
         button.secondary {
-          color: var(--primary-text-color);
-          background: var(--secondary-background-color);
-          box-shadow: inset 0 0 0 1px var(--divider-color);
+          color: #ffffff;
+          background: rgba(255, 255, 255, 0.13);
+          box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
         }
-        button:hover { transform: translateY(-1px); filter: brightness(1.03); }
+        button:hover { transform: translateY(-1px); filter: brightness(1.04); box-shadow: 0 16px 34px rgba(0, 0, 0, 0.32); }
         button:active { transform: scale(0.98); }
         audio { display: none; }
       </style>
@@ -472,8 +628,16 @@ class PipecatAssistCard extends HTMLElement {
               <button class="main-button">${running ? "Stop" : "Talk"}</button>
             </div>
           </div>
-          <div class="bars" aria-hidden="true">
-            ${[0, 1, 2, 3, 4, 5, 6].map((item) => `<span style="--delay:${item * 90}ms"></span>`).join("")}
+          <div class="transcript" aria-live="polite">
+            <div class="user">${escapeHtml(userText)}</div>
+            <div class="assistant">${escapeHtml(assistantText)}</div>
+          </div>
+          <div class="wave" aria-hidden="true">
+            ${[0, 1, 2, 3, 4, 5, 6, 7].map((item) => {
+              const y = (item % 4) * 7 - 10;
+              const r = (item - 3) * 5;
+              return `<span style="--delay:${item * 95}ms;--y:${y}px;--yn:${-y}px;--r:${r}deg;--rn:${-r}deg"></span>`;
+            }).join("")}
           </div>
           <audio autoplay playsinline></audio>
         </div>

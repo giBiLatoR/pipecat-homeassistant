@@ -12,6 +12,8 @@ from .const import VERSION
 from .views import register_proxy_views
 
 PLATFORMS = [Platform.CONVERSATION, Platform.STT, Platform.TTS]
+if hasattr(Platform, "AI_TASK"):
+    PLATFORMS.append(Platform.AI_TASK)
 CARD_RESOURCE_PATH = "/pipecat_assist/pipecat-assist-card.js"
 CARD_MODULE_URL = f"{CARD_RESOURCE_PATH}?v={VERSION}"
 
