@@ -46,6 +46,7 @@ from pipecat.services.openai.realtime.events import (
     TurnDetection,
 )
 from pipecat.services.openai.realtime.llm import OpenAIRealtimeLLMService
+from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.workers.runner import WorkerRunner
 
@@ -1476,8 +1477,27 @@ def _noise_reduction(flow: FlowConfig):
     return InputAudioNoiseReduction(type=flow.noise_reduction)
 
 
-def _runtime_language(flow: FlowConfig, integration: IntegrationConfig | None) -> str:
-    return (integration.language if integration else "") or flow.language or "en"
+def _runtime_language(
+    flow: FlowConfig,
+    integration: IntegrationConfig | None,
+    override: str | None = None,
+) -> str:
+    return (override or "").strip() or (integration.language if integration else "") or flow.language or "en"
+
+
+def _pipecat_language(language: str | None) -> Language | str:
+    value = (language or "").strip()
+    if not value or value.lower() == "pipecat-assist":
+        value = "en"
+    normalized = value.replace("_", "-").lower()
+    for candidate in Language:
+        if candidate.value.lower() == normalized:
+            return candidate
+    base = normalized.split("-", 1)[0]
+    for candidate in Language:
+        if candidate.value.lower() == base:
+            return candidate
+    return value
 
 
 def _runtime_speed(flow: FlowConfig, integration: IntegrationConfig | None) -> float:
@@ -2668,10 +2688,22 @@ def _aws_nova_sonic_service(
     )
 
 
-def _build_stt_service(config: RuntimeConfig, flow: FlowConfig):
+def _build_stt_service(
+    config: RuntimeConfig,
+    flow: FlowConfig,
+    language_override: str | None = None,
+):
     step, integration = _step_integration(config, flow, "stt")
     integration = _require_integration(integration, "STT", fields=())
     model = _step_model_for(step, integration, "stt")
+    language = _runtime_language(flow, integration, language_override)
+    logger.info(
+        "Building composed STT service integration={} kind={} model={} language={}",
+        integration.name,
+        integration.kind,
+        model or "",
+        language,
+    )
 
     if integration.kind == "soniox":
         from pipecat.services.soniox.stt import SonioxSTTService
@@ -2690,7 +2722,13 @@ def _build_stt_service(config: RuntimeConfig, flow: FlowConfig):
     if integration.kind == "speechmatics":
         from pipecat.services.speechmatics.stt import SpeechmaticsSTTService
 
-        return SpeechmaticsSTTService(api_key=_integration_api_key(integration, "STT"))
+        return SpeechmaticsSTTService(
+            api_key=_integration_api_key(integration, "STT"),
+            settings=SpeechmaticsSTTService.Settings(
+                model=model or None,
+                language=_pipecat_language(language),
+            ),
+        )
     if integration.kind == "gradium":
         from pipecat.services.gradium.stt import GradiumSTTService
 
@@ -2704,7 +2742,7 @@ def _build_stt_service(config: RuntimeConfig, flow: FlowConfig):
         return OpenAIRealtimeSTTService(
             api_key=_integration_api_key(integration, "STT", config.openai_api_key),
             model=model or DEFAULT_OPENAI_STT_MODEL,
-            language=_runtime_language(flow, integration),
+            language=language,
         )
 
     raise RuntimeError(f"STT provider {integration.kind} is not supported by composed runtime")
@@ -3001,7 +3039,9 @@ async def run_bot(
     integration = config.model_integration(flow)
     provider_kind = integration.kind if integration else flow.provider_id
     runtime_mode = _runtime_mode(flow, provider_kind)
+    session_body = _runner_body(runner_args)
     client_id = _session_client_id(runner_args, flow)
+    language_override = str(session_body.get("language") or "").strip() or None
 
     bridge: HomeAssistantMCPBridge | None = None
     mcp_tools_schema = None
@@ -3165,7 +3205,7 @@ async def run_bot(
         from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
         from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
-        stt = _build_stt_service(config, flow)
+        stt = _build_stt_service(config, flow, language_override=language_override)
         llm = _build_llm_service(config, flow, tools_schema=tools_schema)
         _register_local_tool_handlers(llm, local_tool_schemas)
         tts = _build_tts_service(config, flow)

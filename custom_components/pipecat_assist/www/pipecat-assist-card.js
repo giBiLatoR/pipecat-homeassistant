@@ -81,6 +81,14 @@ class PipecatAssistCard extends HTMLElement {
     return created;
   }
 
+  sessionLanguage() {
+    return this.config.language
+      || this._hass?.language
+      || this._hass?.locale?.language
+      || navigator.language
+      || "en";
+  }
+
   stop() {
     if (this.pingTimer) {
       clearInterval(this.pingTimer);
@@ -145,7 +153,7 @@ class PipecatAssistCard extends HTMLElement {
             version: "1.4.0",
             about: {
               library: "pipecat-assist-lovelace-card",
-              library_version: "0.1.49",
+              library_version: "0.1.50",
               platform: "home-assistant",
             },
           },
@@ -184,6 +192,7 @@ class PipecatAssistCard extends HTMLElement {
       const requestData = {
         source: "lovelace_card",
         client_id: this.clientId(),
+        language: this.sessionLanguage(),
       };
       if (this.config.flow_id) requestData.flow_id = this.config.flow_id;
       const response = await fetch(this.apiUrl(offerPath), {

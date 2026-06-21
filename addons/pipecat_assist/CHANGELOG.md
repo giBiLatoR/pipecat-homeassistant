@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.50
+
+- Fixed composed WebRTC sessions with Speechmatics STT by passing the active
+  session language into the Pipecat Speechmatics service instead of leaving it
+  at the provider default English setting.
+- Lovelace card and the add-on voice test now send a session language with the
+  WebRTC offer, using the card config, Home Assistant language, or browser
+  language as available.
+
 ## 0.1.49
 
 - Fixed composed Home Assistant Assist STT selection so OpenAI Cloud

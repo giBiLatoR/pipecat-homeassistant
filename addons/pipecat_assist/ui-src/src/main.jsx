@@ -4263,7 +4263,7 @@ function VoiceTest({ config, flow }) {
               version: "1.4.0",
                 about: {
                   library: "pipecat-assist-ui",
-                  library_version: "0.1.49",
+                  library_version: "0.1.50",
                   platform: "browser",
                 },
             },
@@ -4338,6 +4338,7 @@ function VoiceTest({ config, flow }) {
             flow_id: flow.id,
             source: "ui_voice_test",
             client_id: browserClientId(),
+            language: navigator.language || UI_LOCALE || "en",
           },
         }),
       });
