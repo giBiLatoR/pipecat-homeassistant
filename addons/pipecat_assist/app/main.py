@@ -1509,7 +1509,7 @@ def _runtime_speed(flow: FlowConfig, integration: IntegrationConfig | None) -> f
 def _tts_text_aggregation_mode(integration: IntegrationConfig | None):
     if not integration or integration.tts_streaming_mode != "token":
         return None
-    if integration.kind not in {"cartesia", "elevenlabs", "soniox", "gradium", "google_streaming_tts"}:
+    if integration.kind not in {"cartesia", "soniox", "gradium", "google_streaming_tts"}:
         return None
     from pipecat.services.tts_service import TextAggregationMode
 

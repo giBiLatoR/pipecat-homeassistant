@@ -1,25 +1,23 @@
-const PIPECAT_ASSIST_CARD_VERSION = "0.1.51";
-const OPUS_AUDIO_QUALITY_PARAMS = [
-  "minptime=10",
-  "useinbandfec=1",
-  "stereo=1",
-  "sprop-stereo=1",
-  "maxplaybackrate=48000",
-  "maxaveragebitrate=510000",
-  "usedtx=0",
-];
+const PIPECAT_ASSIST_CARD_VERSION = "0.1.52";
+const OPUS_AUDIO_QUALITY_PARAMS = {
+  minptime: "20",
+  useinbandfec: "1",
+  maxplaybackrate: "48000",
+  maxaveragebitrate: "96000",
+  usedtx: "0",
+};
+const OPUS_AUDIO_REMOVE_PARAMS = new Set(["stereo", "sprop-stereo"]);
 
 function mergeOpusFmtp(existing) {
-  const parts = existing
-    .split(";")
-    .map((part) => part.trim())
-    .filter(Boolean);
-  const keys = new Set(parts.map((part) => part.split("=", 1)[0].toLowerCase()));
-  for (const param of OPUS_AUDIO_QUALITY_PARAMS) {
-    const key = param.split("=", 1)[0].toLowerCase();
-    if (!keys.has(key)) parts.push(param);
+  const params = new Map();
+  for (const part of existing.split(";").map((item) => item.trim()).filter(Boolean)) {
+    const [rawKey, ...rest] = part.split("=");
+    const key = rawKey.trim().toLowerCase();
+    if (!key || OPUS_AUDIO_REMOVE_PARAMS.has(key)) continue;
+    params.set(key, rest.length ? rest.join("=").trim() : "");
   }
-  return parts.join(";");
+  for (const [key, value] of Object.entries(OPUS_AUDIO_QUALITY_PARAMS)) params.set(key, value);
+  return [...params.entries()].map(([key, value]) => (value ? `${key}=${value}` : key)).join(";");
 }
 
 function preferFullbandOpus(sdp) {
@@ -140,6 +138,24 @@ class PipecatAssistCard extends HTMLElement {
       || "en";
   }
 
+  resetAudioElement() {
+    if (!this.audio) return;
+    this.audio.pause();
+    this.audio.srcObject = null;
+    this.audio.removeAttribute("src");
+    try {
+      this.audio.load();
+    } catch {
+      // Some mobile WebViews throw while tearing down a live MediaStream.
+    }
+  }
+
+  async waitForAudioSessionRelease() {
+    const elapsed = Date.now() - (this.lastStoppedAt || 0);
+    const remaining = Math.max(0, 450 - elapsed);
+    if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
+  }
+
   stop() {
     if (this.pingTimer) {
       clearInterval(this.pingTimer);
@@ -153,13 +169,24 @@ class PipecatAssistCard extends HTMLElement {
     }));
     this.channel?.close();
     this.channel = undefined;
+    this.peer?.getSenders?.().forEach((sender) => sender.track?.stop());
+    this.peer?.getReceivers?.().forEach((receiver) => receiver.track?.stop());
+    this.peer?.getTransceivers?.().forEach((transceiver) => {
+      try {
+        transceiver.stop();
+      } catch {
+        // Older WebViews may not allow stopping closed transceivers.
+      }
+    });
     this.peer?.close();
     this.peer = undefined;
     this.stream?.getTracks().forEach((track) => track.stop());
     this.stream = undefined;
-    if (this.audio) this.audio.srcObject = null;
+    this.remoteStream?.getTracks().forEach((track) => track.stop());
+    this.resetAudioElement();
     this.remoteStream = undefined;
     this.audioBlocked = false;
+    this.lastStoppedAt = Date.now();
     this.state = "idle";
     this.detail = "Stopped";
     this.render();
@@ -182,6 +209,8 @@ class PipecatAssistCard extends HTMLElement {
       this.state = "requesting";
       this.detail = "Waiting for microphone permission";
       this.render();
+      this.resetAudioElement();
+      await this.waitForAudioSessionRelease();
       const addonConfig = await this.loadAddonConfig();
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: { autoGainControl: true, echoCancellation: true, noiseSuppression: true },

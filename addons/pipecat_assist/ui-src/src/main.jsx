@@ -128,27 +128,25 @@ function appUrl(path) {
   return new URL(path, documentBaseUrl()).href;
 }
 
-const OPUS_AUDIO_QUALITY_PARAMS = [
-  "minptime=10",
-  "useinbandfec=1",
-  "stereo=1",
-  "sprop-stereo=1",
-  "maxplaybackrate=48000",
-  "maxaveragebitrate=510000",
-  "usedtx=0",
-];
+const OPUS_AUDIO_QUALITY_PARAMS = {
+  minptime: "20",
+  useinbandfec: "1",
+  maxplaybackrate: "48000",
+  maxaveragebitrate: "96000",
+  usedtx: "0",
+};
+const OPUS_AUDIO_REMOVE_PARAMS = new Set(["stereo", "sprop-stereo"]);
 
 function mergeOpusFmtp(existing) {
-  const parts = existing
-    .split(";")
-    .map((part) => part.trim())
-    .filter(Boolean);
-  const keys = new Set(parts.map((part) => part.split("=", 1)[0].toLowerCase()));
-  for (const param of OPUS_AUDIO_QUALITY_PARAMS) {
-    const key = param.split("=", 1)[0].toLowerCase();
-    if (!keys.has(key)) parts.push(param);
+  const params = new Map();
+  for (const part of existing.split(";").map((item) => item.trim()).filter(Boolean)) {
+    const [rawKey, ...rest] = part.split("=");
+    const key = rawKey.trim().toLowerCase();
+    if (!key || OPUS_AUDIO_REMOVE_PARAMS.has(key)) continue;
+    params.set(key, rest.length ? rest.join("=").trim() : "");
   }
-  return parts.join(";");
+  for (const [key, value] of Object.entries(OPUS_AUDIO_QUALITY_PARAMS)) params.set(key, value);
+  return [...params.entries()].map(([key, value]) => (value ? `${key}=${value}` : key)).join(";");
 }
 
 function preferFullbandOpus(sdp) {
@@ -269,7 +267,7 @@ const languageIntegrationKinds = [
 ];
 
 const speedIntegrationKinds = ["openai", "openai_cloud", "google_cloud_tts", "elevenlabs"];
-const ttsStreamingIntegrationKinds = ["cartesia", "elevenlabs", "soniox", "gradium", "google_streaming_tts"];
+const ttsStreamingIntegrationKinds = ["cartesia", "soniox", "gradium", "google_streaming_tts"];
 const webSearchProviderKinds = ["openai_cloud", "gemini_cloud", "openai_compatible"];
 
 const stepTypes = [
@@ -4210,6 +4208,7 @@ function VoiceTest({ config, flow }) {
   const peerRef = useRef(null);
   const readySentRef = useRef(false);
   const streamRef = useRef(null);
+  const lastStoppedRef = useRef(0);
   const [state, setState] = useState("idle");
   const [detail, setDetail] = useState("Ready");
   const readiness = voiceReadiness(config, flow);
@@ -4223,7 +4222,7 @@ function VoiceTest({ config, flow }) {
     }
   }, [readiness.ok, state]);
 
-  function disposeSession() {
+  function disposeSession(markStopped = true) {
     closingRef.current = true;
     if (pingRef.current) {
       clearInterval(pingRef.current);
@@ -4246,11 +4245,32 @@ function VoiceTest({ config, flow }) {
     channelRef.current?.close();
     channelRef.current = null;
     readySentRef.current = false;
+    peerRef.current?.getSenders?.().forEach((sender) => sender.track?.stop());
+    peerRef.current?.getReceivers?.().forEach((receiver) => receiver.track?.stop());
+    peerRef.current?.getTransceivers?.().forEach((transceiver) => {
+      try {
+        transceiver.stop();
+      } catch {
+        // Some WebViews throw while transceivers are already closing.
+      }
+    });
     peerRef.current?.close();
     peerRef.current = null;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
-    if (audioRef.current) audioRef.current.srcObject = null;
+    if (audioRef.current) {
+      const remoteStream = audioRef.current.srcObject;
+      if (remoteStream?.getTracks) remoteStream.getTracks().forEach((track) => track.stop());
+      audioRef.current.pause();
+      audioRef.current.srcObject = null;
+      audioRef.current.removeAttribute("src");
+      try {
+        audioRef.current.load();
+      } catch {
+        // Mobile WebViews can throw while releasing a live MediaStream.
+      }
+    }
+    if (markStopped) lastStoppedRef.current = Date.now();
   }
 
   function clearSession(nextState = "idle", nextDetail = "Ready") {
@@ -4280,9 +4300,16 @@ function VoiceTest({ config, flow }) {
       return;
     }
 
-    clearSession("requesting", "Waiting for microphone permission");
+    disposeSession(false);
+    closingRef.current = false;
+    setState("requesting");
+    setDetail("Waiting for microphone permission");
 
     try {
+      const remainingAudioReleaseMs = Math.max(0, 450 - (Date.now() - lastStoppedRef.current));
+      if (remainingAudioReleaseMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, remainingAudioReleaseMs));
+      }
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           autoGainControl: true,
@@ -4315,7 +4342,7 @@ function VoiceTest({ config, flow }) {
               version: "1.4.0",
                 about: {
                   library: "pipecat-assist-ui",
-                  library_version: "0.1.51",
+                  library_version: "0.1.52",
                   platform: "browser",
                 },
             },

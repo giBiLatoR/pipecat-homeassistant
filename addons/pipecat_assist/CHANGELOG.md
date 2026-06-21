@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.52
+
+- Stabilized mobile Lovelace audio by switching the WebRTC Opus offer back to
+  mono fullband voice settings with a lower bitrate and stronger audio-session
+  cleanup between calls.
+- Disabled token-level TTS aggregation for ElevenLabs because it can feed the
+  provider tiny text fragments and cause choppy playback; existing ElevenLabs
+  integrations are repaired back to sentence aggregation.
+
 ## 0.1.51
 
 - Tuned Lovelace card and add-on voice test WebRTC offers for fuller Opus

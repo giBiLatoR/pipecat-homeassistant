@@ -1194,12 +1194,13 @@ def _repair_provider_defaults(config: RuntimeConfig) -> bool:
         if default_model and not integration.default_model:
             integration.default_model = default_model
             changed = True
-        if (
-            integration_id == "elevenlabs"
-            and integration.default_voice in {"", "21m00Tcm4TlvDq8ikWAM"}
-        ):
-            integration.default_voice = DEFAULT_ELEVENLABS_VOICE
-            changed = True
+        if integration_id == "elevenlabs":
+            if integration.default_voice in {"", "21m00Tcm4TlvDq8ikWAM"}:
+                integration.default_voice = DEFAULT_ELEVENLABS_VOICE
+                changed = True
+            if integration.tts_streaming_mode != "sentence":
+                integration.tts_streaming_mode = "sentence"
+                changed = True
         elif default_voice and not integration.default_voice:
             integration.default_voice = default_voice
             changed = True
