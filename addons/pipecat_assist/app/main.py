@@ -970,6 +970,12 @@ async def api_stt_stream(websocket: WebSocket):
         flow = config.selected_flow(start.get("flow_id"))
         metadata = _stt_metadata_from_start(start)
         content_type = str(start.get("content_type") or "audio/wav")
+        logger.info(
+            "HA Assist STT stream started flow={} content_type={} metadata={}",
+            flow.id,
+            content_type,
+            metadata,
+        )
         live_integration = _ha_live_bridge_integration(config, flow, metadata)
         if live_integration:
             logger.info("HA Assist STT using Gemini Live bridge for flow {}", flow.id)
@@ -988,8 +994,17 @@ async def api_stt_stream(websocket: WebSocket):
             raise _bridge_unavailable("STT", "Google Gemini, OpenAI Cloud, OpenAI Realtime, or Deepgram")
         integration = _require_integration(integration, "STT", fields=())
         model = _step_model_for(step, integration, "stt", DEFAULT_OPENAI_STT_MODEL)
+        streaming_kind = _streaming_stt_kind(integration, model)
+        logger.info(
+            "HA Assist STT selected flow={} integration={} kind={} model={} mode={}",
+            flow.id,
+            integration.name,
+            integration.kind,
+            model,
+            streaming_kind or "buffered",
+        )
 
-        if _streaming_stt_kind(integration, model):
+        if streaming_kind:
             provider_queue = asyncio.Queue(maxsize=32)
             provider_task = asyncio.create_task(
                 _streaming_transcribe_audio(
@@ -1027,6 +1042,14 @@ async def api_stt_stream(websocket: WebSocket):
             if event.get("type") == "end":
                 break
 
+        audio = b"".join(chunks)
+        logger.info(
+            "HA Assist STT stream received flow={} chunks={} bytes={}",
+            flow.id,
+            len(chunks),
+            len(audio),
+        )
+
         if provider_queue and provider_task and not provider_task.done():
             await provider_queue.put(None)
 
@@ -1046,15 +1069,21 @@ async def api_stt_stream(websocket: WebSocket):
             result = await _transcribe_audio_bytes(
                 config=config,
                 flow=flow,
-                audio=b"".join(chunks),
+                audio=audio,
                 metadata=metadata,
                 content_type=content_type,
             )
             transcript = result.get("text", "")
 
+        logger.info(
+            "HA Assist STT stream finished flow={} transcript={}",
+            flow.id,
+            _text_fingerprint(transcript),
+        )
         await websocket.send_json({"type": "final", "text": transcript.strip()})
         await websocket.close()
     except WebSocketDisconnect:
+        logger.info("HA Assist STT stream disconnected flow={}", flow.id)
         if provider_queue:
             with suppress(Exception):
                 await provider_queue.put(None)
@@ -1584,7 +1613,6 @@ def _streaming_stt_kind(integration: IntegrationConfig | None, model: str) -> st
     if integration.kind in {"openai", "openai_cloud"}:
         if "realtime" in (model or "") or "realtime" in (integration.default_stt_model or ""):
             return "openai_realtime"
-        return "openai_realtime"
     return ""
 
 

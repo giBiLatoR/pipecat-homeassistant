@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.49
+
+- Fixed composed Home Assistant Assist STT selection so OpenAI Cloud
+  transcription models such as `gpt-4o-mini-transcribe` use the stable buffered
+  transcription endpoint instead of being incorrectly routed through the
+  realtime STT bridge.
+- Added Home Assistant Assist STT stream logs with selected provider, mode,
+  received audio size, and transcript fingerprint to make composed pipeline
+  audio issues visible in add-on logs.
+
 ## 0.1.48
 
 - Home Assistant Assist conversation responses now keep
