@@ -184,6 +184,12 @@ overrides and return to the Supervisor-backed defaults. Manually pasted
 long-lived access tokens are only needed for custom installations outside the
 Supervisor path.
 
+The optional **HA MCP Server Add-on** integration is detected automatically
+through the Home Assistant Supervisor API. Pipecat Assist reads the add-on's
+generated secret MCP URL and does not require a Bearer token for this
+integration. Use Bearer tokens only for custom MCP servers that explicitly
+require one.
+
 Gemini Live is the default first-run pipeline. Add a Google AI Studio key in
 **Integrations > Google Gemini Live**, keep
 `models/gemini-3.1-flash-live-preview` as the realtime model, and use

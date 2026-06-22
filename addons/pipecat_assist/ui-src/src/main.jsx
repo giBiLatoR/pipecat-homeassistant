@@ -98,6 +98,14 @@ const UI_TRANSLATIONS = {
 
 UI_TRANSLATIONS.pl["Image task provider"] = "\u0179r\u00f3d\u0142o obraz\u00f3w AI";
 UI_TRANSLATIONS.pl["First enabled image provider"] = "Pierwszy w\u0142\u0105czony provider obraz\u00f3w";
+UI_TRANSLATIONS.pl["Auto-detect"] = "Wykryj automatycznie";
+UI_TRANSLATIONS.pl["Test MCP"] = "Test MCP";
+UI_TRANSLATIONS.pl["Automatic"] = "Automatycznie";
+UI_TRANSLATIONS.pl["Not detected"] = "Nie wykryto";
+UI_TRANSLATIONS.pl["Detected endpoint"] = "Wykryty endpoint";
+UI_TRANSLATIONS.pl["Manual URL"] = "R\u0119czny URL";
+UI_TRANSLATIONS.pl["Hide manual"] = "Ukryj r\u0119czne";
+UI_TRANSLATIONS.pl["MCP server URL"] = "URL serwera MCP";
 
 function detectLocale() {
   const candidates = [
@@ -140,7 +148,7 @@ const OPUS_AUDIO_QUALITY_PARAMS = {
   usedtx: "0",
 };
 const OPUS_AUDIO_REMOVE_PARAMS = new Set(["stereo", "sprop-stereo"]);
-const ASSISTANT_CARD_VERSION = "0.1.69";
+const ASSISTANT_CARD_VERSION = "0.1.70";
 const ASSISTANT_CARD_ACCENT_HEX = "#206cff";
 const ASSISTANT_CARD_AUDIO_BUFFER_MS = 120;
 const STREAM_FADE_GROUPS = 4;
@@ -505,6 +513,10 @@ const API = {
   audioDebug: appUrl("api/assist/debug/audio"),
   integrationReset: (integrationId) =>
     appUrl(`api/assist/integrations/${encodeURIComponent(integrationId)}/reset`),
+  integrationDetect: (integrationId) =>
+    appUrl(`api/assist/integrations/${encodeURIComponent(integrationId)}/detect`),
+  integrationMcp: (integrationId) =>
+    appUrl(`api/assist/integrations/${encodeURIComponent(integrationId)}/mcp/check`),
   models: (integrationId, capability = "llm") =>
     appUrl(`api/assist/integrations/${encodeURIComponent(integrationId)}/models?capability=${encodeURIComponent(capability)}`),
 };
@@ -1704,7 +1716,10 @@ function integrationSummary(integration, config = null) {
   if (integration.kind === "home_assistant_mcp") {
     return config ? mcpMode(config).label : "Automatic";
   }
-  if (["ha_mcp", "mcp_server"].includes(integration.kind)) {
+  if (integration.kind === "ha_mcp") {
+    return integration.base_url || integration.endpoint ? "Automatic" : "Not detected";
+  }
+  if (integration.kind === "mcp_server") {
     return integration.base_url || integration.endpoint || "URL missing";
   }
   if (integration.kind === "web_search") {
@@ -1804,6 +1819,7 @@ function App() {
   const [selectedIntegrationId, setSelectedIntegrationId] = useState("gemini");
   const [modelOptions, setModelOptions] = useState({});
   const [mcpResult, setMcpResult] = useState(null);
+  const autoDetectedIntegrations = useRef(new Set());
   const [message, setMessage] = useState({ text: "", tone: "" });
   const [fatalError, setFatalError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -1852,6 +1868,19 @@ function App() {
     if (!config || !activeFlow) return { ok: false, errors: ["Configuration is loading"], warnings: [] };
     return validatePipeline(config, activeFlow);
   }, [activeFlow, config]);
+
+  useEffect(() => {
+    if (
+      integrationStage !== "detail" ||
+      selectedIntegration?.kind !== "ha_mcp" ||
+      selectedIntegration.base_url ||
+      autoDetectedIntegrations.current.has(selectedIntegration.id)
+    ) {
+      return;
+    }
+    autoDetectedIntegrations.current.add(selectedIntegration.id);
+    detectIntegration(selectedIntegration.id, { silent: true });
+  }, [integrationStage, selectedIntegration?.base_url, selectedIntegration?.id, selectedIntegration?.kind]);
 
   async function load() {
     setFatalError("");
@@ -2180,12 +2209,57 @@ function App() {
       body: JSON.stringify({ flow_id: selectedFlow.id, refresh: true }),
     });
     const result = await response.json();
-    setMcpResult(result);
+    setMcpResult({ ...result, integration_id: "ha-mcp" });
     setMessage(
       result.ok
         ? { text: `MCP connected: ${result.tool_count} tools`, tone: "ok" }
         : { text: result.error || "MCP check failed", tone: "error" },
     );
+    await refreshMcpHistory();
+  }
+
+  async function detectIntegration(integrationId, { silent = false } = {}) {
+    if (!silent) setMessage({ text: "Detecting integration", tone: "" });
+    const response = await fetch(API.integrationDetect(integrationId), { method: "POST" });
+    if (!response.ok) {
+      const detail = await response.text();
+      if (!silent) setMessage({ text: detail || "Auto-detect failed", tone: "error" });
+      return false;
+    }
+    const result = await response.json();
+    const { detection, ...configPayload } = result;
+    setConfig(ensureShape(configPayload));
+    await refreshStatus();
+    if (detection?.ok) {
+      if (!silent) {
+        setMessage({ text: `Detected ${detection.url}`, tone: "ok" });
+      }
+      return true;
+    }
+    if (!silent) {
+      setMessage({ text: detection?.error || "Auto-detect failed", tone: "error" });
+    }
+    return false;
+  }
+
+  async function checkIntegrationMcp(integrationId) {
+    setMessage({ text: "Checking MCP", tone: "" });
+    const response = await fetch(API.integrationMcp(integrationId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ flow_id: selectedFlow.id, refresh: true }),
+    });
+    const result = await response.json();
+    if (result.config) {
+      setConfig(ensureShape(result.config));
+    }
+    setMcpResult({ ...result, integration_id: integrationId });
+    setMessage(
+      result.ok
+        ? { text: `MCP connected: ${result.tool_count} tools`, tone: "ok" }
+        : { text: result.error || "MCP check failed", tone: "error" },
+    );
+    await refreshStatus();
     await refreshMcpHistory();
   }
 
@@ -2212,7 +2286,7 @@ function App() {
     const nextConfig = ensureShape(await response.json());
     setConfig(nextConfig);
     setSelectedIntegrationId(integrationId);
-    if (integrationId === "ha-mcp") setMcpResult(null);
+    if (["ha-mcp", "ha-mcp-server"].includes(integrationId)) setMcpResult(null);
     await refreshStatus();
     setMessage({ text: "Integration reset to defaults", tone: "ok" });
   }
@@ -2368,6 +2442,8 @@ function App() {
             modelOptions={modelOptions}
             loadModelOptions={loadModelOptions}
             checkMcp={checkMcp}
+            detectIntegration={detectIntegration}
+            checkIntegrationMcp={checkIntegrationMcp}
             resetMcpDefaults={resetMcpDefaults}
             resetIntegrationDefaults={resetIntegrationDefaults}
             save={save}
@@ -2820,7 +2896,7 @@ function PipelineView({
         ) : selectedStep ? (
           <>
             <div className="form-grid">
-              {["stt", "llm", "web_search", "tools", "tts", "output"].includes(selectedStep.kind) && (
+              {["stt", "llm", "tts", "output"].includes(selectedStep.kind) && (
                 <Field label={t("Integration")}>
                   <select
                     value={selectedStep.integration_id || ""}
@@ -2928,7 +3004,6 @@ function PipelineView({
 
         {selectedStep?.kind === "web_search" && (
           <>
-            <div className="divider" />
             <div className="form-grid">
               <Toggle
                 checked={selectedStep.settings?.announce !== false}
@@ -2945,6 +3020,11 @@ function PipelineView({
               </div>
             </div>
           </>
+        )}
+        {selectedStep?.kind === "tools" && (
+          <div className="empty-state">
+            MCP servers are configured globally in Integrations. Enable one or more MCP integrations there to expose tools to this pipeline.
+          </div>
         )}
       </section>
     </div>
@@ -3768,6 +3848,8 @@ function IntegrationsView({
   modelOptions,
   loadModelOptions,
   checkMcp,
+  detectIntegration,
+  checkIntegrationMcp,
   resetMcpDefaults,
   resetIntegrationDefaults,
   save,
@@ -3876,6 +3958,8 @@ function IntegrationsView({
           modelOptions={modelOptions}
           loadModelOptions={loadModelOptions}
           checkMcp={checkMcp}
+          detectIntegration={detectIntegration}
+          checkIntegrationMcp={checkIntegrationMcp}
           resetMcpDefaults={resetMcpDefaults}
           mcpResult={mcpResult}
         />
@@ -3962,14 +4046,29 @@ function WebSearchSettings({ integration, config, updateIntegration, modelOption
   );
 }
 
-function IntegrationSettings({ integration, config, updateIntegration, modelOptions, loadModelOptions, checkMcp, resetMcpDefaults, mcpResult }) {
+function IntegrationSettings({
+  integration,
+  config,
+  updateIntegration,
+  modelOptions,
+  loadModelOptions,
+  checkMcp,
+  detectIntegration,
+  checkIntegrationMcp,
+  resetMcpDefaults,
+  mcpResult,
+}) {
   const [manualMcpOpen, setManualMcpOpen] = useState(false);
+  const visibleMcpResult =
+    !mcpResult?.integration_id || mcpResult.integration_id === integration.id ? mcpResult : null;
 
   useEffect(() => {
     if (integration.kind === "home_assistant_mcp") {
       setManualMcpOpen(Boolean(integration.base_url || integration.token_configured || integration.token === REDACTED));
+      return;
     }
-  }, [integration.base_url, integration.id, integration.kind, integration.token, integration.token_configured]);
+    setManualMcpOpen(false);
+  }, [integration.id, integration.kind]);
 
   if (integration.kind === "gemini") {
     return (
@@ -4096,10 +4195,10 @@ function IntegrationSettings({ integration, config, updateIntegration, modelOpti
                 : "MCP token is not available."}
           </span>
         </div>
-        {mcpResult && (
-          <div className={mcpResult.ok ? "mcp-result ok wide" : "mcp-result error wide"}>
-            <strong>{mcpResult.ok ? `${mcpResult.tool_count} tools available` : "MCP test failed"}</strong>
-            <span>{mcpResult.ok ? (mcpResult.tools || []).slice(0, 8).join(", ") : mcpResult.error}</span>
+        {visibleMcpResult && (
+          <div className={visibleMcpResult.ok ? "mcp-result ok wide" : "mcp-result error wide"}>
+            <strong>{visibleMcpResult.ok ? `${visibleMcpResult.tool_count} tools available` : "MCP test failed"}</strong>
+            <span>{visibleMcpResult.ok ? (visibleMcpResult.tools || []).slice(0, 8).join(", ") : visibleMcpResult.error}</span>
           </div>
         )}
         {manualMcpOpen && (
@@ -4123,7 +4222,52 @@ function IntegrationSettings({ integration, config, updateIntegration, modelOpti
     );
   }
 
-  if (["ha_mcp", "mcp_server"].includes(integration.kind)) {
+  if (integration.kind === "ha_mcp") {
+    const detected = Boolean(integration.base_url || integration.endpoint);
+    return (
+      <SettingsSection title="HA MCP Server Add-on" status={detected ? t("Automatic") : t("Not detected")}>
+        <div className={detected ? "mcp-mode ok wide" : "mcp-mode error wide"}>
+          <strong>{detected ? t("Automatic") : t("Not detected")}</strong>
+          <span>
+            {detected
+              ? "Using the secret MCP URL detected from the Home Assistant MCP Server add-on. No Bearer token is required."
+              : "Install and start the Home Assistant MCP Server add-on, then run auto-detect."}
+          </span>
+        </div>
+        {detected && (
+          <div className="empty-state wide">
+            <strong>{t("Detected endpoint")}</strong>
+            <span>{integration.base_url || integration.endpoint}</span>
+          </div>
+        )}
+        {visibleMcpResult && (
+          <div className={visibleMcpResult.ok ? "mcp-result ok wide" : "mcp-result error wide"}>
+            <strong>{visibleMcpResult.ok ? `${visibleMcpResult.tool_count} tools available` : "MCP test failed"}</strong>
+            <span>{visibleMcpResult.ok ? (visibleMcpResult.tools || []).slice(0, 8).join(", ") : visibleMcpResult.error}</span>
+          </div>
+        )}
+        {manualMcpOpen && (
+          <TextSetting integration={integration} field="base_url" label={t("MCP server URL")} updateIntegration={updateIntegration} wide />
+        )}
+        <div className="button-row wide">
+          <Button icon={Search} variant="secondary" onClick={() => detectIntegration?.(integration.id)}>
+            {t("Auto-detect")}
+          </Button>
+          <Button icon={RefreshCw} variant="secondary" onClick={() => checkIntegrationMcp?.(integration.id)}>
+            {t("Test MCP")}
+          </Button>
+          <Button icon={Settings} variant="secondary" onClick={() => setManualMcpOpen((value) => !value)}>
+            {manualMcpOpen ? t("Hide manual") : t("Manual URL")}
+          </Button>
+        </div>
+        <div className="empty-state wide">
+          This add-on uses its own generated secret URL and Home Assistant Supervisor authentication. Pipecat Assist only needs the detected HTTP MCP endpoint.
+        </div>
+      </SettingsSection>
+    );
+  }
+
+  if (integration.kind === "mcp_server") {
     return (
       <SettingsSection title={kindLabel(integration.kind)}>
         <TextSetting integration={integration} field="base_url" label="MCP server URL" updateIntegration={updateIntegration} wide />

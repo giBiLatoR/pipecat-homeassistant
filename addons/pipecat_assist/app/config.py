@@ -1298,6 +1298,10 @@ def _repair_provider_defaults(config: RuntimeConfig) -> bool:
         if os.getenv("HA_MCP_SERVER_URL") and not ha_mcp_server.base_url:
             ha_mcp_server.base_url = os.getenv("HA_MCP_SERVER_URL", "")
             changed = True
+        if ha_mcp_server.token or ha_mcp_server.api_key:
+            ha_mcp_server.token = ""
+            ha_mcp_server.api_key = ""
+            changed = True
 
     provider_defaults = {
         "soniox": ("SONIOX_API_KEY", DEFAULT_SONIOX_MODEL, ""),

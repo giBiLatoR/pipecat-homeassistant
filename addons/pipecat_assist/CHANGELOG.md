@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.70
+
+- Auto-detect the Home Assistant MCP Server add-on through the Supervisor API,
+  using the add-on's generated secret URL without asking for a Bearer token.
+- Add per-integration MCP testing for the HA MCP Server add-on and clear old
+  saved tokens for that integration during config migration.
+- Remove redundant integration selectors from Web Search and Tools pipeline
+  steps; their providers are configured globally in Integrations.
+
 ## 0.1.69
 
 - End realtime and HA Assist conversations when the user clearly closes the

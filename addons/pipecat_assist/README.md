@@ -23,4 +23,9 @@ for Home Assistant image-generation tasks. Session Memory and Web Search are
 visible pipeline steps, and official Pipecat Flows can be enabled inside
 composed realtime pipelines.
 
+The built-in Home Assistant MCP integration uses the Supervisor connection
+automatically. The optional HA MCP Server Add-on integration is also detected
+automatically from the add-on's generated secret URL and does not need a Bearer
+token.
+
 For setup, testing, and troubleshooting, see `DOCS.md`.
