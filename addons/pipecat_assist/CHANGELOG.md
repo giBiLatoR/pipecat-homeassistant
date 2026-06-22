@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.67
+
+- Replace the add-on Assistant voice test with the same Pipecat Assist card
+  experience used in Lovelace: transcript stream, smooth scrolling, status
+  badge, wave visualizer, and clean stop behavior.
+- Move "Edit active pipeline" into the top bar before the theme toggle so the
+  Assistant tab stays focused on the conversation card.
+
 ## 0.1.66
 
 - Smooth Lovelace transcript scrolling so new lines no longer reanimate the

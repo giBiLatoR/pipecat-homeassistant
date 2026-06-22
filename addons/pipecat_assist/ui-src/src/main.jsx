@@ -136,6 +136,310 @@ const OPUS_AUDIO_QUALITY_PARAMS = {
   usedtx: "0",
 };
 const OPUS_AUDIO_REMOVE_PARAMS = new Set(["stereo", "sprop-stereo"]);
+const ASSISTANT_CARD_VERSION = "0.1.67";
+const ASSISTANT_CARD_ACCENT_HEX = "#206cff";
+const ASSISTANT_CARD_AUDIO_BUFFER_MS = 120;
+const STREAM_FADE_GROUPS = 4;
+const STREAM_CHARS_PER_GROUP = 2;
+const STREAM_FADE_LEN = STREAM_FADE_GROUPS * STREAM_CHARS_PER_GROUP;
+const END_CONVERSATION_PHRASES = [
+  "to wszystko",
+  "koniec rozmowy",
+  "ok koniec",
+  "okej koniec",
+  "that is all",
+  "that's all",
+  "end conversation",
+  "stop listening",
+  "we are done",
+  "goodbye",
+];
+
+const ASSISTANT_CARD_TRANSLATIONS = {
+  en: {
+    ready: "Ready",
+    connecting: "Connecting",
+    connected: "Connected",
+    error: "Error",
+    greeting: "What would you like to do today?",
+    talk: "Talk",
+    stop: "Stop",
+    enableAudio: "Enable audio",
+    audioBlocked: "Audio is connected, but the browser blocked playback.",
+    waitingForMicrophone: "Waiting for microphone permission",
+    microphoneUnavailable: "Microphone access is not available from this browser context.",
+    microphoneBlocked: "Microphone access is blocked. Allow microphone access and retry.",
+    connectedDetail: "Connected. Speak to Pipecat Assist.",
+    connectingAudio: "Connecting audio",
+    setupNeeded: "Setup needed",
+  },
+  pl: {
+    ready: "Gotowy",
+    connecting: "\u0141\u0105czenie",
+    connected: "Po\u0142\u0105czono",
+    error: "B\u0142\u0105d",
+    greeting: "Co chcia\u0142by\u015b dzisiaj zrobi\u0107?",
+    talk: "M\u00f3w",
+    stop: "Zatrzymaj",
+    enableAudio: "W\u0142\u0105cz d\u017awi\u0119k",
+    audioBlocked: "D\u017awi\u0119k jest po\u0142\u0105czony, ale przegl\u0105darka zablokowa\u0142a odtwarzanie.",
+    waitingForMicrophone: "Oczekiwanie na zgod\u0119 u\u017cycia mikrofonu",
+    microphoneUnavailable: "Dost\u0119p do mikrofonu nie jest dost\u0119pny w tej przegl\u0105darce.",
+    microphoneBlocked: "Dost\u0119p do mikrofonu jest zablokowany. Zezw\u00f3l na mikrofon i spr\u00f3buj ponownie.",
+    connectedDetail: "Po\u0142\u0105czono. Powiedz co\u015b do Pipecat Assist.",
+    connectingAudio: "\u0141\u0105czenie audio",
+    setupNeeded: "Wymagana konfiguracja",
+  },
+};
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function hexToRgb(value) {
+  const fallback = ASSISTANT_CARD_ACCENT_HEX;
+  const raw = String(value || "").trim();
+  const short = /^#?([0-9a-f]{3})$/i.exec(raw);
+  const full = /^#?([0-9a-f]{6})$/i.exec(raw);
+  const hex = short
+    ? short[1].split("").map((part) => `${part}${part}`).join("")
+    : full
+      ? full[1]
+      : fallback.slice(1);
+  return {
+    r: Number.parseInt(hex.slice(0, 2), 16),
+    g: Number.parseInt(hex.slice(2, 4), 16),
+    b: Number.parseInt(hex.slice(4, 6), 16),
+  };
+}
+
+function normalizeTranscriptText(value) {
+  return String(value || "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\s+([,.;:!?%…)\]}])/g, "$1")
+    .replace(/([,.;:!?])(?=\p{L}|\p{N})/gu, "$1 ")
+    .replace(/([([{])\s+/g, "$1")
+    .trim();
+}
+
+function compactTranscript(value) {
+  return normalizeTranscriptText(value)
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function transcriptOverlapSize(existing, incoming) {
+  const max = Math.min(existing.length, incoming.length, 160);
+  const existingLower = existing.toLocaleLowerCase();
+  const incomingLower = incoming.toLocaleLowerCase();
+  for (let length = max; length > 0; length -= 1) {
+    if (existingLower.slice(-length) === incomingLower.slice(0, length)) return length;
+  }
+  return 0;
+}
+
+function transcriptJoiner(existing, incoming, rawIncoming) {
+  if (!existing || !incoming) return "";
+  if (/^\s/.test(String(rawIncoming || ""))) return " ";
+  if (/^[,.;:!?%…)\]}]/.test(incoming)) return "";
+  if (/[(\[{]$/.test(existing)) return "";
+  if (/[-/–—]$/.test(existing) || /^[-/–—]/.test(incoming)) return "";
+  return " ";
+}
+
+function mergeTranscript(existing, chunk) {
+  const current = normalizeTranscriptText(existing);
+  const rawText = String(chunk || "");
+  const text = normalizeTranscriptText(rawText);
+  if (!text) return current;
+  if (!current) return text;
+
+  const currentCompact = compactTranscript(current);
+  const textCompact = compactTranscript(text);
+  if (!textCompact) return current;
+  if (textCompact === currentCompact) return current;
+  if (textCompact.startsWith(currentCompact) && text.length >= current.length) return text;
+
+  const currentTail = compactTranscript(current.slice(-320));
+  if (textCompact.length > 3 && currentTail.includes(textCompact)) return current;
+
+  const overlap = transcriptOverlapSize(current, text);
+  if (overlap > 0) {
+    return normalizeTranscriptText(`${current}${text.slice(overlap)}`);
+  }
+
+  return normalizeTranscriptText(`${current}${transcriptJoiner(current, text, rawText)}${text}`);
+}
+
+function transcriptWords(value) {
+  return normalizeTranscriptText(value)
+    .toLocaleLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((word) => word.length > 2);
+}
+
+function transcriptTokenParts(value) {
+  const text = normalizeTranscriptText(value);
+  return [...text.matchAll(/\p{L}[\p{L}\p{N}]*/gu)]
+    .map((match) => ({
+      text: match[0],
+      compact: compactTranscript(match[0]),
+      start: match.index,
+      end: match.index + match[0].length,
+    }))
+    .filter((token) => token.compact);
+}
+
+function transcriptWordSimilarity(left, right) {
+  const leftWords = new Set(transcriptWords(left));
+  const rightWords = new Set(transcriptWords(right));
+  if (!leftWords.size || !rightWords.size) return 0;
+  let matched = 0;
+  for (const word of leftWords) {
+    if (rightWords.has(word)) matched += 1;
+  }
+  return matched / Math.min(leftWords.size, rightWords.size);
+}
+
+function fragmentedTranscriptScore(value) {
+  return normalizeTranscriptText(value)
+    .split(/\s+/)
+    .filter((part) => /^\p{L}$/u.test(part))
+    .length;
+}
+
+function hasTerminalTranscriptPunctuation(text) {
+  return /[.!?]\s*$/.test(normalizeTranscriptText(text));
+}
+
+function isLikelyTranscriptReplacement(existing, incoming) {
+  const current = normalizeTranscriptText(existing);
+  const text = normalizeTranscriptText(incoming);
+  if (!current || !text) return false;
+  const currentCompact = compactTranscript(current);
+  const textCompact = compactTranscript(text);
+  if (textCompact === currentCompact) return true;
+  if (textCompact.startsWith(currentCompact) && text.length >= current.length) return true;
+  if (currentCompact.includes(textCompact) && textCompact.length < currentCompact.length * 0.72) return false;
+
+  const similarity = transcriptWordSimilarity(current, text);
+  const currentFragmented = fragmentedTranscriptScore(current);
+  const incomingFragmented = fragmentedTranscriptScore(text);
+  if (hasTerminalTranscriptPunctuation(text) && similarity >= 0.52 && text.length >= current.length * 0.55) return true;
+  if (currentFragmented >= incomingFragmented + 2 && similarity >= 0.4) return true;
+  return similarity >= 0.72 && text.length >= current.length * 0.75 && incomingFragmented <= currentFragmented;
+}
+
+function isTranscriptFragment(text, reference) {
+  const incoming = compactTranscript(text);
+  const existing = compactTranscript(reference);
+  if (!incoming || !existing || incoming.length > existing.length) return false;
+  if (existing.includes(incoming)) return true;
+  const incomingWords = transcriptWords(text);
+  if (incoming.length > 12 || incomingWords.length !== 1) return false;
+  return transcriptWords(reference)
+    .map((word) => compactTranscript(word))
+    .some((word) => word && (word.startsWith(incoming) || incoming.startsWith(word)));
+}
+
+function mergeDisplayTurnText(existing, incoming) {
+  const current = normalizeTranscriptText(existing);
+  const text = normalizeTranscriptText(incoming);
+  if (!text) return current;
+  if (!current || isLikelyTranscriptReplacement(current, text)) return text;
+  if (isTranscriptFragment(text, current)) return current;
+  return mergeTranscript(current, text);
+}
+
+function removeTranscriptEchoSpan(text, reference) {
+  const cleanText = normalizeTranscriptText(text);
+  const refTokens = transcriptTokenParts(reference);
+  const tokens = transcriptTokenParts(cleanText);
+  if (refTokens.length < 2 || tokens.length < 2) return cleanText;
+
+  let best = null;
+  for (let start = 0; start < tokens.length; start += 1) {
+    let length = 0;
+    while (
+      start + length < tokens.length
+      && length < refTokens.length
+      && tokens[start + length].compact === refTokens[length].compact
+    ) {
+      length += 1;
+    }
+    const enough = length >= Math.min(3, refTokens.length) || (refTokens.length === 2 && length === 2);
+    if (enough && length / refTokens.length >= 0.62 && (!best || length > best.length)) {
+      best = { start, length };
+    }
+  }
+
+  if (!best) return cleanText;
+  const first = tokens[best.start];
+  const last = tokens[best.start + best.length - 1];
+  return normalizeTranscriptText(`${cleanText.slice(0, first.start)} ${cleanText.slice(last.end)}`);
+}
+
+function isLikelyTranscriptEcho(text, reference) {
+  const incoming = compactTranscript(text);
+  const existing = compactTranscript(reference);
+  if (incoming.length < 6 || existing.length < 6) return false;
+  if (existing.includes(incoming)) return true;
+
+  const incomingWords = transcriptWords(text);
+  if (incomingWords.length < 2) return false;
+  const existingWords = new Set(transcriptWords(reference));
+  const matched = incomingWords.filter((word) => existingWords.has(word)).length;
+  return matched >= 2 && matched / incomingWords.length >= 0.75;
+}
+
+function mergeAssistantTurnText(existing, incoming, priority, currentPriority) {
+  const current = normalizeTranscriptText(existing);
+  const text = normalizeTranscriptText(incoming);
+  if (!text) return current;
+  if (!current) return text;
+
+  if (hasTerminalTranscriptPunctuation(current) && isTranscriptFragment(text, current)) return current;
+  if (priority > currentPriority) {
+    if (isTranscriptFragment(text, current) && !isLikelyTranscriptReplacement(current, text)) return current;
+    return text;
+  }
+  if (isLikelyTranscriptReplacement(current, text)) return text;
+  return mergeTranscript(current, text);
+}
+
+function firstString(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return "";
+}
+
+function rtviAssistantTextPriority(type) {
+  if (type === "bot-output") return 4;
+  if (type === "bot-transcription") return 3;
+  if (type === "bot-tts-text") return 2;
+  if (type === "bot-llm-text") return 1;
+  if (type.startsWith("assistant-")) return 2;
+  return 0;
+}
+
+function isRtviUserTextType(type) {
+  return type === "user-transcription" || type === "user-llm-text" || type.startsWith("user-");
+}
+
+function isRtviAssistantTextType(type) {
+  return rtviAssistantTextPriority(type) > 0;
+}
+
+function shouldEndConversation(text) {
+  const clean = String(text || "").toLowerCase().replace(/[.,!?]/g, " ").replace(/\s+/g, " ").trim();
+  return END_CONVERSATION_PHRASES.some((phrase) => clean.includes(phrase));
+}
+
+function assistantCardT(key) {
+  return ASSISTANT_CARD_TRANSLATIONS[UI_LOCALE]?.[key] || ASSISTANT_CARD_TRANSLATIONS.en[key] || key;
+}
 
 function mergeOpusFmtp(existing) {
   const params = new Map();
@@ -1635,6 +1939,12 @@ function App() {
     setPipelineStage("editor");
   }
 
+  function editActivePipeline() {
+    if (!activeFlow) return;
+    setTab("pipelines");
+    openFlow(activeFlow.id);
+  }
+
   function addFlow(templateId = "gemini_live_home") {
     const template = templates.find((item) => item.id === templateId) || templates[0];
     const baseName = template.label;
@@ -1959,6 +2269,11 @@ function App() {
             <span>{activeValidation.ok ? `${activeFlow.mode} pipeline` : activeValidation.errors[0]}</span>
           </div>
           <div className="actions">
+            {tab === "assistant" && (
+              <Button icon={Workflow} variant="secondary" onClick={editActivePipeline}>
+                {t("Edit active pipeline")}
+              </Button>
+            )}
             <button
               className="theme-toggle icon-only"
               onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
@@ -1989,7 +2304,6 @@ function App() {
             config={config}
             flow={activeFlow}
             status={status}
-            setTab={openTab}
           />
         )}
 
@@ -2231,7 +2545,7 @@ function validatePipeline(config, flow) {
   return { ok: errors.length === 0, errors: [...new Set(errors)], warnings: [...new Set(warnings)] };
 }
 
-function AssistantView({ config, flow, status, setTab }) {
+function AssistantView({ config, flow, status }) {
   const template = pipelineTemplate(flow);
   const Icon = template.icon || Bot;
   const validation = validatePipeline(config, flow);
@@ -2263,11 +2577,6 @@ function AssistantView({ config, flow, status, setTab }) {
           </div>
         )}
         <VoiceTest config={config} flow={flow} />
-        <div className="assistant-actions">
-          <Button icon={Workflow} variant="secondary" onClick={() => setTab("pipelines")}>
-            {t("Edit active pipeline")}
-          </Button>
-        </div>
       </section>
     </div>
   );
@@ -4248,6 +4557,7 @@ function mcpStatusLabel(config, status) {
 
 function VoiceTest({ config, flow }) {
   const audioRef = useRef(null);
+  const canvasRef = useRef(null);
   const channelRef = useRef(null);
   const closingRef = useRef(false);
   const connectTimeoutRef = useRef(null);
@@ -4256,20 +4566,729 @@ function VoiceTest({ config, flow }) {
   const readySentRef = useRef(false);
   const streamRef = useRef(null);
   const lastStoppedRef = useRef(0);
+  const stateRef = useRef("idle");
+  const messagesRef = useRef([]);
+  const transcriptFlowRef = useRef(null);
+  const transcriptSeqRef = useRef(0);
+  const currentUserMessageIdRef = useRef("");
+  const currentAssistantMessageIdRef = useRef("");
+  const streamAssistantMessageIdRef = useRef("");
+  const userTranscriptRef = useRef("");
+  const assistantTranscriptRef = useRef("");
+  const partialTranscriptRef = useRef("");
+  const currentUserTextRef = useRef("");
+  const currentUserUpdatedAtRef = useRef(0);
+  const assistantTurnBaseRef = useRef("");
+  const assistantTurnTextRef = useRef("");
+  const assistantTurnPriorityRef = useRef(0);
+  const assistantTurnActiveRef = useRef(false);
+  const assistantLastTurnTextRef = useRef("");
+  const assistantLastTurnPriorityRef = useRef(0);
+  const assistantLastTurnFinishedAtRef = useRef(0);
+  const lastAssistantTextAtRef = useRef(0);
+  const lastUserTextAtRef = useRef(0);
+  const botSpeakingRef = useRef(false);
+  const ignoreLocalSpeechUntilRef = useRef(0);
+  const assistantTurnFinishTimerRef = useRef(null);
+  const localSpeechRecognitionRef = useRef(null);
+  const localSpeechEndingRef = useRef(false);
+  const localSpeechPausedForAssistantRef = useRef(false);
+  const localSpeechResumeTimerRef = useRef(null);
+  const scrollFrameRef = useRef(null);
+  const scrollPosRef = useRef(0);
+  const scrollTargetRef = useRef(0);
+  const scrollLastTsRef = useRef(0);
+  const visualizerContextRef = useRef(null);
+  const visualizerEnergyRef = useRef(0);
+  const visualizerFrameRef = useRef(null);
+  const visualizerInputsRef = useRef({});
   const [state, setState] = useState("idle");
-  const [detail, setDetail] = useState("Ready");
+  const [detail, setDetail] = useState(assistantCardT("ready"));
+  const [messages, setMessages] = useState([]);
+  const [audioBlocked, setAudioBlocked] = useState(false);
   const readiness = voiceReadiness(config, flow);
 
-  useEffect(() => () => disposeSession(), []);
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
+  useEffect(() => {
+    visualizerFrameRef.current = requestAnimationFrame(drawVisualizer);
+    return () => {
+      disposeSession(true, false);
+      stopLocalSpeechRecognition();
+      cancelLocalSpeechResume();
+      stopTranscriptScroll();
+      if (assistantTurnFinishTimerRef.current) clearTimeout(assistantTurnFinishTimerRef.current);
+      if (visualizerFrameRef.current) cancelAnimationFrame(visualizerFrameRef.current);
+      disconnectVisualizerInputs(true);
+    };
+  }, []);
+
+  useEffect(() => {
+    scrollTranscriptToEnd();
+  }, [messages]);
 
   useEffect(() => {
     if (state === "error" && readiness.ok) {
-      setState("idle");
-      setDetail("Ready");
+      setSessionState("idle", assistantCardT("ready"));
     }
   }, [readiness.ok, state]);
 
-  function disposeSession(markStopped = true) {
+  function setSessionState(nextState, nextDetail = detail) {
+    stateRef.current = nextState;
+    setState(nextState);
+    setDetail(nextDetail);
+  }
+
+  function commitMessages(updater) {
+    const next = updater(messagesRef.current);
+    messagesRef.current = next;
+    setMessages(next);
+  }
+
+  function chatMessageById(id) {
+    return messagesRef.current.find((message) => message.id === id) || null;
+  }
+
+  function appendChatMessage(type, text) {
+    const id = `m${++transcriptSeqRef.current}`;
+    const message = { id, type, text: normalizeTranscriptText(text), entered: false, streaming: false };
+    commitMessages((current) => {
+      const next = [...current, message];
+      while (next.length > 12) {
+        const removed = next.shift();
+        if (removed?.id === currentUserMessageIdRef.current) currentUserMessageIdRef.current = "";
+        if (removed?.id === currentAssistantMessageIdRef.current) currentAssistantMessageIdRef.current = "";
+        if (removed?.id === streamAssistantMessageIdRef.current) streamAssistantMessageIdRef.current = "";
+      }
+      return next;
+    });
+    requestAnimationFrame(() => {
+      commitMessages((current) => current.map((item) => (item.id === id ? { ...item, entered: true } : item)));
+    });
+    return id;
+  }
+
+  function updateChatMessage(id, text, options = {}) {
+    const clean = normalizeTranscriptText(text);
+    commitMessages((current) =>
+      current.map((message) =>
+        message.id === id ? { ...message, text: clean, streaming: Boolean(options.stream) } : message,
+      ),
+    );
+  }
+
+  function setCurrentUserCaption(text, startsNewTurn) {
+    const clean = normalizeTranscriptText(text);
+    if (!clean) return;
+    if (startsNewTurn || !currentUserMessageIdRef.current || !chatMessageById(currentUserMessageIdRef.current)) {
+      currentUserMessageIdRef.current = appendChatMessage("user", clean);
+    } else {
+      updateChatMessage(currentUserMessageIdRef.current, clean);
+    }
+  }
+
+  function setCurrentAssistantCaption(text) {
+    const clean = normalizeTranscriptText(text);
+    if (!clean) return;
+    if (!currentAssistantMessageIdRef.current || !chatMessageById(currentAssistantMessageIdRef.current)) {
+      currentAssistantMessageIdRef.current = appendChatMessage("assistant", clean);
+    }
+    streamAssistantMessageIdRef.current = currentAssistantMessageIdRef.current;
+    updateChatMessage(currentAssistantMessageIdRef.current, clean, { stream: true });
+  }
+
+  function finalizeAssistantCaption() {
+    if (!currentAssistantMessageIdRef.current || !assistantTurnTextRef.current) return;
+    updateChatMessage(currentAssistantMessageIdRef.current, assistantTurnTextRef.current);
+    streamAssistantMessageIdRef.current = "";
+  }
+
+  function clearTranscriptData() {
+    userTranscriptRef.current = "";
+    assistantTranscriptRef.current = "";
+    partialTranscriptRef.current = "";
+    currentUserTextRef.current = "";
+    currentUserUpdatedAtRef.current = 0;
+    assistantTurnBaseRef.current = "";
+    assistantTurnTextRef.current = "";
+    assistantTurnPriorityRef.current = 0;
+    assistantTurnActiveRef.current = false;
+    assistantLastTurnTextRef.current = "";
+    assistantLastTurnPriorityRef.current = 0;
+    assistantLastTurnFinishedAtRef.current = 0;
+    lastAssistantTextAtRef.current = 0;
+    lastUserTextAtRef.current = 0;
+    botSpeakingRef.current = false;
+    ignoreLocalSpeechUntilRef.current = 0;
+    currentUserMessageIdRef.current = "";
+    currentAssistantMessageIdRef.current = "";
+    streamAssistantMessageIdRef.current = "";
+    transcriptSeqRef.current = 0;
+    stopTranscriptScroll();
+    scrollPosRef.current = 0;
+    scrollTargetRef.current = 0;
+    messagesRef.current = [];
+    setMessages([]);
+  }
+
+  function renderTranscriptText(message) {
+    if (!message.streaming || message.text.length <= STREAM_FADE_LEN) return message.text;
+    const solid = message.text.slice(0, message.text.length - STREAM_FADE_LEN);
+    const tail = message.text.slice(message.text.length - STREAM_FADE_LEN);
+    return (
+      <>
+        {solid}
+        {Array.from({ length: STREAM_FADE_GROUPS }, (_, index) => (
+          <span key={index} style={{ opacity: ((STREAM_FADE_GROUPS - index) / STREAM_FADE_GROUPS).toFixed(2) }}>
+            {tail.slice(index * STREAM_CHARS_PER_GROUP, index * STREAM_CHARS_PER_GROUP + STREAM_CHARS_PER_GROUP)}
+          </span>
+        ))}
+      </>
+    );
+  }
+
+  function scrollTranscriptToEnd() {
+    const el = transcriptFlowRef.current;
+    if (!el) return;
+    const max = el.scrollHeight - el.clientHeight;
+    if (max <= 0) return;
+    scrollTargetRef.current = max;
+    startTranscriptScroll();
+  }
+
+  function startTranscriptScroll() {
+    if (scrollFrameRef.current) return;
+    const el = transcriptFlowRef.current;
+    if (el) scrollPosRef.current = el.scrollTop;
+    scrollTargetRef.current = Math.max(scrollTargetRef.current || 0, el ? el.scrollHeight - el.clientHeight : 0);
+    scrollLastTsRef.current = 0;
+    scrollFrameRef.current = requestAnimationFrame(transcriptScrollTick);
+  }
+
+  function stopTranscriptScroll() {
+    if (scrollFrameRef.current) {
+      cancelAnimationFrame(scrollFrameRef.current);
+      scrollFrameRef.current = null;
+    }
+    scrollLastTsRef.current = 0;
+  }
+
+  function transcriptScrollTick(timestamp) {
+    const el = transcriptFlowRef.current;
+    if (!el) {
+      stopTranscriptScroll();
+      return;
+    }
+    const max = el.scrollHeight - el.clientHeight;
+    if (max <= 0) {
+      stopTranscriptScroll();
+      return;
+    }
+    if (!scrollLastTsRef.current) scrollLastTsRef.current = timestamp;
+    const deltaMs = timestamp - scrollLastTsRef.current;
+    scrollLastTsRef.current = timestamp;
+    const target = Math.min(max, Math.max(scrollTargetRef.current || 0, max));
+    const distance = target - scrollPosRef.current;
+    const absDistance = Math.abs(distance);
+    if (absDistance <= 0.5) {
+      el.scrollTop = target;
+      stopTranscriptScroll();
+      return;
+    }
+    const easing = Math.max(0.08, Math.min(0.32, deltaMs / 160));
+    const minStep = Math.min(absDistance, Math.max(0.7, deltaMs * 0.06));
+    const step = Math.sign(distance) * Math.max(minStep, absDistance * easing);
+    scrollPosRef.current = Math.min(max, Math.max(0, scrollPosRef.current + step));
+    el.scrollTop = scrollPosRef.current;
+    scrollFrameRef.current = requestAnimationFrame(transcriptScrollTick);
+  }
+
+  function ensureVisualizerInput(name, stream) {
+    if (!stream?.getAudioTracks?.().length) return;
+    const trackIds = stream.getAudioTracks().map((track) => track.id).join(",");
+    if (visualizerInputsRef.current[name]?.trackIds === trackIds) return;
+    disconnectVisualizerInput(name);
+
+    const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextConstructor) return;
+    try {
+      if (!visualizerContextRef.current || visualizerContextRef.current.state === "closed") {
+        visualizerContextRef.current = new AudioContextConstructor();
+      }
+      if (visualizerContextRef.current.state === "suspended") {
+        visualizerContextRef.current.resume().catch(() => {});
+      }
+      const source = visualizerContextRef.current.createMediaStreamSource(stream);
+      const analyser = visualizerContextRef.current.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = name === "remote" ? 0.72 : 0.82;
+      source.connect(analyser);
+      visualizerInputsRef.current[name] = {
+        analyser,
+        data: new Uint8Array(analyser.frequencyBinCount),
+        source,
+        trackIds,
+      };
+    } catch {
+      disconnectVisualizerInput(name);
+    }
+  }
+
+  function disconnectVisualizerInput(name) {
+    const input = visualizerInputsRef.current[name];
+    if (!input) return;
+    try {
+      input.source.disconnect();
+    } catch {
+      // Ignore already disconnected visualizer nodes.
+    }
+    delete visualizerInputsRef.current[name];
+  }
+
+  function disconnectVisualizerInputs(closeContext = false) {
+    for (const name of Object.keys(visualizerInputsRef.current)) disconnectVisualizerInput(name);
+    if (closeContext && visualizerContextRef.current && visualizerContextRef.current.state !== "closed") {
+      visualizerContextRef.current.close().catch(() => {});
+      visualizerContextRef.current = null;
+    }
+    visualizerEnergyRef.current = 0;
+  }
+
+  function visualizerEnergyFor(name) {
+    const input = visualizerInputsRef.current[name];
+    if (!input?.analyser) return 0;
+    input.analyser.getByteFrequencyData(input.data);
+    const limit = Math.min(input.data.length, 96);
+    let sum = 0;
+    for (let index = 0; index < limit; index += 1) sum += input.data[index];
+    return Math.min(1, sum / Math.max(1, limit) / 150);
+  }
+
+  function drawVisualizer() {
+    const canvas = canvasRef.current;
+    if (canvas) {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const width = Math.max(1, Math.floor(rect.width * dpr));
+      const height = Math.max(1, Math.floor(rect.height * dpr));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+
+      const ctx = canvas.getContext("2d");
+      const accent = hexToRgb(ASSISTANT_CARD_ACCENT_HEX);
+      const localEnergy = visualizerEnergyFor("local");
+      const remoteEnergy = visualizerEnergyFor("remote");
+      const running = ["requesting", "connecting", "connected"].includes(stateRef.current);
+      const audioActive = Math.max(localEnergy, remoteEnergy) > 0.018
+        || botSpeakingRef.current
+        || assistantTurnActiveRef.current
+        || Boolean(partialTranscriptRef.current);
+      const idleEnergy = running ? 0.06 : 0.025;
+      const targetEnergy = Math.max(localEnergy, remoteEnergy, idleEnergy);
+      visualizerEnergyRef.current = visualizerEnergyRef.current * 0.82 + targetEnergy * 0.18;
+      const energy = visualizerEnergyRef.current;
+      const time = audioActive || running ? performance.now() / 1000 : 0;
+
+      ctx.clearRect(0, 0, width, height);
+      const horizon = height * 0.68;
+      const gradient = ctx.createLinearGradient(0, 0, 0, height);
+      gradient.addColorStop(0, `rgba(${accent.r}, ${accent.g}, ${accent.b}, 0)`);
+      gradient.addColorStop(0.24, `rgba(${accent.r}, ${accent.g}, ${accent.b}, 0.025)`);
+      gradient.addColorStop(0.68, `rgba(${accent.r}, ${accent.g}, ${accent.b}, 0.18)`);
+      gradient.addColorStop(1, `rgba(${accent.r}, ${accent.g}, ${accent.b}, 0.55)`);
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, width, height);
+
+      ctx.save();
+      ctx.translate(width / 2, horizon + height * 0.68);
+      ctx.scale(1, 0.32);
+      ctx.beginPath();
+      ctx.arc(0, 0, width * (0.5 + energy * 0.07), 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(190, 220, 255, ${0.34 + energy * 0.28})`;
+      ctx.lineWidth = Math.max(1, 1.4 * dpr);
+      ctx.shadowColor = `rgba(${accent.r}, ${accent.g}, ${accent.b}, 0.88)`;
+      ctx.shadowBlur = 18 * dpr + energy * 30 * dpr;
+      ctx.stroke();
+      ctx.restore();
+
+      const drawWave = (color, offset, amplitude, widthScale, alpha) => {
+        ctx.beginPath();
+        for (let x = 0; x <= width; x += Math.max(2, width / 120)) {
+          const progress = x / width;
+          const envelope = Math.sin(progress * Math.PI);
+          const y = height * 0.62
+            + Math.sin(progress * Math.PI * 4.6 + time * 2.2 + offset) * amplitude * envelope
+            + Math.sin(progress * Math.PI * 9.2 - time * 1.4 - offset) * amplitude * 0.28 * envelope;
+          if (x === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = color.replace("ALPHA", alpha.toFixed(3));
+        ctx.lineWidth = Math.max(1, widthScale * dpr);
+        ctx.shadowColor = color.replace("ALPHA", "0.85");
+        ctx.shadowBlur = 10 * dpr + energy * 18 * dpr;
+        ctx.stroke();
+      };
+
+      drawWave("rgba(255, 255, 255, ALPHA)", 0, 10 * dpr + energy * 34 * dpr, 1.35, 0.52 + energy * 0.42);
+      drawWave(`rgba(${Math.min(255, accent.r + 61)}, ${Math.min(255, accent.g + 61)}, 255, ALPHA)`, 1.7, 16 * dpr + energy * 46 * dpr, 1.1, 0.42 + energy * 0.32);
+      drawWave(`rgba(${accent.r}, ${accent.g}, ${accent.b}, ALPHA)`, 3.1, 20 * dpr + energy * 58 * dpr, 0.9, 0.28 + energy * 0.28);
+    }
+    visualizerFrameRef.current = requestAnimationFrame(drawVisualizer);
+  }
+
+  function startLocalSpeechRecognition() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+    if (localSpeechPausedForAssistantRef.current || assistantTurnActiveRef.current || botSpeakingRef.current) return;
+    stopLocalSpeechRecognition();
+    try {
+      const recognition = new SpeechRecognition();
+      localSpeechEndingRef.current = false;
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = String(navigator.language || UI_LOCALE || "en").replace("_", "-");
+      recognition.onresult = (event) => {
+        if (localSpeechPausedForAssistantRef.current || assistantTurnActiveRef.current || botSpeakingRef.current) return;
+        let finalText = "";
+        let interimText = "";
+        for (let index = event.resultIndex; index < event.results.length; index += 1) {
+          const result = event.results[index];
+          const text = result?.[0]?.transcript || "";
+          if (!text) continue;
+          if (result.isFinal) finalText = mergeTranscript(finalText, text);
+          else interimText = mergeTranscript(interimText, text);
+        }
+        const spokenText = finalText || interimText;
+        if (shouldIgnoreLocalSpeech(spokenText)) return;
+        if (finalText) applyUserText(finalText, true);
+        else if (interimText) applyUserText(interimText, false);
+      };
+      recognition.onerror = () => {
+        partialTranscriptRef.current = "";
+      };
+      recognition.onend = () => {
+        localSpeechRecognitionRef.current = null;
+        if (
+          localSpeechEndingRef.current
+          || localSpeechPausedForAssistantRef.current
+          || assistantTurnActiveRef.current
+          || botSpeakingRef.current
+          || !["requesting", "connecting", "connected"].includes(stateRef.current)
+        ) return;
+        window.setTimeout(() => startLocalSpeechRecognition(), 250);
+      };
+      localSpeechRecognitionRef.current = recognition;
+      recognition.start();
+    } catch {
+      localSpeechRecognitionRef.current = null;
+    }
+  }
+
+  function stopLocalSpeechRecognition() {
+    const recognition = localSpeechRecognitionRef.current;
+    localSpeechRecognitionRef.current = null;
+    localSpeechEndingRef.current = true;
+    if (!recognition) return;
+    try {
+      recognition.onresult = null;
+      recognition.onerror = null;
+      recognition.onend = null;
+      recognition.stop();
+    } catch {
+      try {
+        recognition.abort();
+      } catch {
+        // Ignore browser-specific SpeechRecognition teardown errors.
+      }
+    }
+  }
+
+  function cancelLocalSpeechResume() {
+    if (localSpeechResumeTimerRef.current) {
+      clearTimeout(localSpeechResumeTimerRef.current);
+      localSpeechResumeTimerRef.current = null;
+    }
+    localSpeechPausedForAssistantRef.current = false;
+  }
+
+  function pauseLocalSpeechForAssistant() {
+    if (localSpeechResumeTimerRef.current) {
+      clearTimeout(localSpeechResumeTimerRef.current);
+      localSpeechResumeTimerRef.current = null;
+    }
+    localSpeechPausedForAssistantRef.current = true;
+    partialTranscriptRef.current = "";
+    stopLocalSpeechRecognition();
+  }
+
+  function resumeLocalSpeechAfterAssistant(delayMs = 450) {
+    if (!localSpeechPausedForAssistantRef.current) return;
+    if (localSpeechResumeTimerRef.current) clearTimeout(localSpeechResumeTimerRef.current);
+    localSpeechResumeTimerRef.current = window.setTimeout(() => {
+      localSpeechResumeTimerRef.current = null;
+      if (!localSpeechPausedForAssistantRef.current) return;
+      localSpeechPausedForAssistantRef.current = false;
+      if (["requesting", "connecting", "connected"].includes(stateRef.current) && !localSpeechRecognitionRef.current) {
+        startLocalSpeechRecognition();
+      }
+    }, delayMs);
+  }
+
+  function assistantEchoReferences() {
+    return [
+      assistantTurnTextRef.current,
+      assistantLastTurnTextRef.current,
+      assistantTranscriptRef.current,
+    ].filter(Boolean);
+  }
+
+  function cleanUserSpeechText(text) {
+    let cleaned = normalizeTranscriptText(text);
+    for (const reference of assistantEchoReferences()) {
+      cleaned = removeTranscriptEchoSpan(cleaned, reference);
+    }
+    return cleaned;
+  }
+
+  function shouldIgnoreLocalSpeech(text) {
+    if (!text) return false;
+    const assistantReference = mergeTranscript(assistantTranscriptRef.current, assistantTurnTextRef.current);
+    if (!assistantReference) return false;
+    return (botSpeakingRef.current || Date.now() < (ignoreLocalSpeechUntilRef.current || 0))
+      && isLikelyTranscriptEcho(text, assistantReference);
+  }
+
+  function applyUserText(text, finalEvent) {
+    const cleanedText = cleanUserSpeechText(text);
+    if (!cleanedText) return;
+    if (assistantEchoReferences().some((reference) => isLikelyTranscriptEcho(cleanedText, reference))) return;
+    const now = Date.now();
+    lastUserTextAtRef.current = now;
+    const startsNewUserTurn = lastAssistantTextAtRef.current > currentUserUpdatedAtRef.current
+      || (!partialTranscriptRef.current && currentUserUpdatedAtRef.current && now - currentUserUpdatedAtRef.current > 8000);
+    if (finalEvent) {
+      currentUserTextRef.current = startsNewUserTurn
+        ? cleanedText
+        : mergeDisplayTurnText(currentUserTextRef.current, cleanedText);
+      currentUserUpdatedAtRef.current = now;
+      userTranscriptRef.current = mergeTranscript(userTranscriptRef.current, cleanedText);
+      partialTranscriptRef.current = "";
+    } else {
+      partialTranscriptRef.current = cleanedText;
+      currentUserTextRef.current = startsNewUserTurn
+        ? cleanedText
+        : mergeDisplayTurnText(currentUserTextRef.current, cleanedText);
+      currentUserUpdatedAtRef.current = now;
+    }
+    setCurrentUserCaption(currentUserTextRef.current, startsNewUserTurn);
+    if (shouldEndConversation(`${currentUserTextRef.current} ${partialTranscriptRef.current}`)) {
+      window.setTimeout(() => stopVoiceTest(), 450);
+    }
+  }
+
+  function beginAssistantTurn() {
+    if (assistantTurnFinishTimerRef.current) {
+      clearTimeout(assistantTurnFinishTimerRef.current);
+      assistantTurnFinishTimerRef.current = null;
+    }
+    pauseLocalSpeechForAssistant();
+    if (assistantTurnActiveRef.current) {
+      botSpeakingRef.current = true;
+      ignoreLocalSpeechUntilRef.current = Date.now() + 1200;
+      return;
+    }
+    assistantTurnBaseRef.current = normalizeTranscriptText(assistantTranscriptRef.current);
+    assistantTurnTextRef.current = "";
+    assistantTurnPriorityRef.current = 0;
+    assistantTurnActiveRef.current = true;
+    currentAssistantMessageIdRef.current = "";
+    streamAssistantMessageIdRef.current = "";
+    botSpeakingRef.current = true;
+    ignoreLocalSpeechUntilRef.current = Date.now() + 1200;
+  }
+
+  function finishAssistantTurn(resumeLocalSpeech = true) {
+    if (assistantTurnFinishTimerRef.current) {
+      clearTimeout(assistantTurnFinishTimerRef.current);
+      assistantTurnFinishTimerRef.current = null;
+    }
+    assistantTranscriptRef.current = normalizeTranscriptText(assistantTranscriptRef.current);
+    assistantTurnBaseRef.current = assistantTranscriptRef.current;
+    if (assistantTurnTextRef.current) {
+      finalizeAssistantCaption();
+      assistantLastTurnTextRef.current = assistantTurnTextRef.current;
+      assistantLastTurnPriorityRef.current = assistantTurnPriorityRef.current;
+      assistantLastTurnFinishedAtRef.current = Date.now();
+      lastAssistantTextAtRef.current = assistantLastTurnFinishedAtRef.current;
+    }
+    assistantTurnTextRef.current = "";
+    assistantTurnPriorityRef.current = 0;
+    assistantTurnActiveRef.current = false;
+    botSpeakingRef.current = false;
+    streamAssistantMessageIdRef.current = "";
+    ignoreLocalSpeechUntilRef.current = Date.now() + 900;
+    if (resumeLocalSpeech && ["requesting", "connecting", "connected"].includes(stateRef.current)) {
+      resumeLocalSpeechAfterAssistant(450);
+    }
+  }
+
+  function scheduleAssistantTurnFinish(delayMs = 1000) {
+    if (assistantTurnFinishTimerRef.current) clearTimeout(assistantTurnFinishTimerRef.current);
+    botSpeakingRef.current = false;
+    ignoreLocalSpeechUntilRef.current = Date.now() + delayMs;
+    assistantTurnFinishTimerRef.current = window.setTimeout(() => finishAssistantTurn(), delayMs);
+  }
+
+  function ensureAssistantTurn() {
+    if (!assistantTurnActiveRef.current) beginAssistantTurn();
+  }
+
+  function applyAssistantText(text, priority) {
+    if (isLikelyTranscriptEcho(text, mergeTranscript(currentUserTextRef.current, partialTranscriptRef.current))) return;
+    const normalizedText = normalizeTranscriptText(text);
+    if (!normalizedText) return;
+    const now = Date.now();
+    const recentAssistantReplayWindow = assistantLastTurnFinishedAtRef.current
+      && lastUserTextAtRef.current < assistantLastTurnFinishedAtRef.current
+      && now - assistantLastTurnFinishedAtRef.current < 4500;
+    const assistantReference = mergeTranscript(assistantTranscriptRef.current, assistantTurnTextRef.current);
+    if (
+      (hasTerminalTranscriptPunctuation(assistantTurnTextRef.current)
+        && isTranscriptFragment(normalizedText, assistantTurnTextRef.current))
+      || (recentAssistantReplayWindow && isTranscriptFragment(normalizedText, assistantLastTurnTextRef.current))
+      || (recentAssistantReplayWindow && priority <= (assistantLastTurnPriorityRef.current || 0)
+        && isTranscriptFragment(normalizedText, assistantReference))
+    ) return;
+    ensureAssistantTurn();
+    if (assistantTurnFinishTimerRef.current) {
+      clearTimeout(assistantTurnFinishTimerRef.current);
+      assistantTurnFinishTimerRef.current = null;
+    }
+    const previousTurnPriority = assistantTurnPriorityRef.current || 0;
+    if (priority > previousTurnPriority) {
+      assistantTurnPriorityRef.current = priority;
+      assistantTurnTextRef.current = mergeAssistantTurnText(
+        assistantTurnTextRef.current,
+        normalizedText,
+        priority,
+        previousTurnPriority,
+      );
+    } else if (priority === assistantTurnPriorityRef.current) {
+      assistantTurnTextRef.current = mergeAssistantTurnText(
+        assistantTurnTextRef.current,
+        normalizedText,
+        priority,
+        assistantTurnPriorityRef.current,
+      );
+    } else {
+      return;
+    }
+    assistantTranscriptRef.current = mergeTranscript(assistantTurnBaseRef.current, assistantTurnTextRef.current);
+    lastAssistantTextAtRef.current = Date.now();
+    ignoreLocalSpeechUntilRef.current = Date.now() + 1200;
+    setCurrentAssistantCaption(assistantTurnTextRef.current);
+    if (shouldEndConversation(assistantTranscriptRef.current)) {
+      window.setTimeout(() => stopVoiceTest(), 650);
+    }
+  }
+
+  function textFromEvent(data) {
+    if (!data || typeof data !== "object") return "";
+    const nested = data.data && typeof data.data === "object" ? data.data : {};
+    return firstString(
+      data.text,
+      data.transcript,
+      data.message,
+      data.content,
+      data.delta,
+      nested.text,
+      nested.transcript,
+      nested.message,
+      nested.content,
+      nested.delta,
+    );
+  }
+
+  function handleRealtimeMessage(raw) {
+    if (typeof raw !== "string" || !raw.trim().startsWith("{")) return;
+    let message;
+    try {
+      message = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    const type = String(message.type || message.event || message.name || "").toLowerCase();
+    const label = String(message.label || "").toLowerCase();
+    if (type === "bot-llm-started" || type === "bot-tts-started" || type === "bot-started-speaking") {
+      beginAssistantTurn();
+    }
+    if (type === "bot-llm-stopped" || type === "bot-tts-stopped" || type === "bot-stopped-speaking") {
+      scheduleAssistantTurnFinish();
+    }
+
+    const text = textFromEvent(message);
+    if (!text) return;
+
+    const finalEvent = type === "user-llm-text"
+      || type.includes("final")
+      || Boolean(message.data?.final || message.is_final || message.final);
+
+    if (isRtviUserTextType(type)) {
+      applyUserText(text, finalEvent);
+      return;
+    }
+
+    if (isRtviAssistantTextType(type) || (label.includes("bot") && !type.startsWith("user-"))) {
+      applyAssistantText(text, rtviAssistantTextPriority(type) || 1);
+    }
+  }
+
+  function audioBufferMs() {
+    const value = Number(config?.audio_buffer_ms ?? ASSISTANT_CARD_AUDIO_BUFFER_MS);
+    if (!Number.isFinite(value)) return ASSISTANT_CARD_AUDIO_BUFFER_MS;
+    return clamp(Math.round(value), 0, 4000);
+  }
+
+  function applyRemoteAudioBuffer(receiver) {
+    const targetMs = audioBufferMs();
+    if (!receiver || !targetMs) return;
+    try {
+      if ("jitterBufferTarget" in receiver) receiver.jitterBufferTarget = targetMs;
+    } catch {
+      // Browser support for jitterBufferTarget is uneven.
+    }
+    const targetSeconds = targetMs / 1000;
+    for (const legacyName of ["playoutDelayHint", "jitterBufferDelayHint"]) {
+      try {
+        if (legacyName in receiver) receiver[legacyName] = targetSeconds;
+      } catch {
+        // Ignore unsupported WebRTC delay hints.
+      }
+    }
+  }
+
+  function attachAudio(remoteStream) {
+    if (!audioRef.current || !remoteStream) return;
+    if (audioRef.current.srcObject !== remoteStream) audioRef.current.srcObject = remoteStream;
+    audioRef.current.autoplay = true;
+    audioRef.current.playsInline = true;
+    audioRef.current.muted = false;
+    audioRef.current.volume = 1;
+    const playPromise = audioRef.current.play();
+    if (playPromise?.catch) {
+      playPromise.catch((err) => {
+        if (err?.name !== "NotAllowedError" || audioBlocked) return;
+        setAudioBlocked(true);
+        setDetail(assistantCardT("audioBlocked"));
+      });
+    }
+  }
+
+  function disposeSession(markStopped = true, updateUi = true) {
     closingRef.current = true;
     if (pingRef.current) {
       clearInterval(pingRef.current);
@@ -4303,8 +5322,15 @@ function VoiceTest({ config, flow }) {
     });
     peerRef.current?.close();
     peerRef.current = null;
+    stopLocalSpeechRecognition();
+    cancelLocalSpeechResume();
+    if (assistantTurnFinishTimerRef.current) {
+      clearTimeout(assistantTurnFinishTimerRef.current);
+      assistantTurnFinishTimerRef.current = null;
+    }
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
+    disconnectVisualizerInputs();
     if (audioRef.current) {
       const remoteStream = audioRef.current.srcObject;
       if (remoteStream?.getTracks) remoteStream.getTracks().forEach((track) => track.stop());
@@ -4317,40 +5343,40 @@ function VoiceTest({ config, flow }) {
         // Mobile WebViews can throw while releasing a live MediaStream.
       }
     }
+    if (updateUi) setAudioBlocked(false);
     if (markStopped) lastStoppedRef.current = Date.now();
   }
 
-  function clearSession(nextState = "idle", nextDetail = "Ready") {
+  function clearSession(nextState = "idle", nextDetail = assistantCardT("ready")) {
     disposeSession();
-    setState(nextState);
-    setDetail(nextDetail);
+    clearTranscriptData();
+    setSessionState(nextState, nextDetail);
     window.setTimeout(() => {
       closingRef.current = false;
     }, 0);
   }
 
   function stopVoiceTest(updateState = true) {
-    clearSession(updateState ? "idle" : state, updateState ? "Stopped" : detail);
+    finishAssistantTurn(false);
+    clearSession(updateState ? "idle" : stateRef.current, updateState ? assistantCardT("ready") : detail);
   }
 
   async function startVoiceTest() {
     const currentReadiness = voiceReadiness(config, flow);
     if (!currentReadiness.ok) {
-      setState("error");
-      setDetail(currentReadiness.detail);
+      setSessionState("error", currentReadiness.detail);
       return;
     }
 
     if (!navigator.mediaDevices?.getUserMedia) {
-      setState("error");
-      setDetail("This browser cannot access a microphone from the current context.");
+      setSessionState("error", assistantCardT("microphoneUnavailable"));
       return;
     }
 
     disposeSession(false);
+    clearTranscriptData();
     closingRef.current = false;
-    setState("requesting");
-    setDetail("Waiting for microphone permission");
+    setSessionState("requesting", assistantCardT("waitingForMicrophone"));
 
     try {
       const remainingAudioReleaseMs = Math.max(0, 450 - (Date.now() - lastStoppedRef.current));
@@ -4366,6 +5392,8 @@ function VoiceTest({ config, flow }) {
         video: false,
       });
       streamRef.current = stream;
+      ensureVisualizerInput("local", stream);
+      startLocalSpeechRecognition();
 
       const peerConnection = new RTCPeerConnection();
       peerRef.current = peerConnection;
@@ -4378,6 +5406,7 @@ function VoiceTest({ config, flow }) {
 
       const channel = peerConnection.createDataChannel("signalling");
       channelRef.current = channel;
+      channel.onmessage = (event) => handleRealtimeMessage(event.data);
       const sendClientReady = () => {
         if (readySentRef.current || channel.readyState !== "open") return;
         channel.send(
@@ -4385,11 +5414,11 @@ function VoiceTest({ config, flow }) {
             label: "rtvi-ai",
             id: crypto.randomUUID().slice(0, 8),
             type: "client-ready",
-            data: {
+          data: {
               version: "1.4.0",
                 about: {
                   library: "pipecat-assist-ui",
-                  library_version: "0.1.66",
+                  library_version: ASSISTANT_CARD_VERSION,
                   platform: "browser",
                 },
             },
@@ -4406,9 +5435,10 @@ function VoiceTest({ config, flow }) {
 
       peerConnection.ontrack = (event) => {
         if (event.track.kind !== "audio") return;
-        if (!audioRef.current) return;
-        audioRef.current.srcObject = event.streams[0] || new MediaStream([event.track]);
-        audioRef.current.play().catch(() => {});
+        applyRemoteAudioBuffer(event.receiver);
+        const remoteStream = event.streams[0] || new MediaStream([event.track]);
+        ensureVisualizerInput("remote", remoteStream);
+        attachAudio(remoteStream);
       };
 
       const markConnected = () => {
@@ -4416,8 +5446,7 @@ function VoiceTest({ config, flow }) {
           clearTimeout(connectTimeoutRef.current);
           connectTimeoutRef.current = null;
         }
-        setState("connected");
-        setDetail("Connected. Speak to the selected assistant.");
+        setSessionState("connected", assistantCardT("connectedDetail"));
       };
 
       const failWebRtc = (message) => {
@@ -4448,8 +5477,7 @@ function VoiceTest({ config, flow }) {
         }
       };
 
-      setState("connecting");
-      setDetail("Creating WebRTC offer");
+      setSessionState("connecting", "Creating WebRTC offer");
       const offer = await peerConnection.createOffer({ voiceActivityDetection: false });
       await peerConnection.setLocalDescription({ type: offer.type, sdp: preferFullbandOpus(offer.sdp) });
       await waitForIceGatheringComplete(peerConnection);
@@ -4478,7 +5506,10 @@ function VoiceTest({ config, flow }) {
         sdp: answer.sdp,
         type: answer.type,
       });
-      setDetail("Connecting audio");
+      peerConnection.getReceivers?.()
+        .filter((receiver) => receiver.track?.kind === "audio")
+        .forEach((receiver) => applyRemoteAudioBuffer(receiver));
+      setDetail(assistantCardT("connectingAudio"));
       if (
         peerConnection.connectionState === "connected" ||
         ["connected", "completed"].includes(peerConnection.iceConnectionState)
@@ -4495,38 +5526,72 @@ function VoiceTest({ config, flow }) {
   }
 
   const running = ["requesting", "connecting", "connected"].includes(state);
-  const stateLabel = state === "idle" && !readiness.ok ? t("Setup needed") : {
-    connected: t("Connected"),
-    connecting: t("Connecting"),
-    error: t("Needs attention"),
-    idle: t("Idle"),
-    requesting: t("Microphone"),
+  const stateLabel = state === "idle" && !readiness.ok ? assistantCardT("setupNeeded") : {
+    connected: assistantCardT("connected"),
+    connecting: assistantCardT("connecting"),
+    error: assistantCardT("error"),
+    idle: assistantCardT("ready"),
+    requesting: assistantCardT("connecting"),
   }[state];
-  const displayDetail = state === "idle" ? readiness.detail : detail;
+  const statusClass = state === "idle" && !readiness.ok
+    ? "error"
+    : state === "connected"
+      ? "connected"
+      : state === "requesting" || state === "connecting"
+        ? "connecting"
+        : state === "error"
+          ? "error"
+          : "ready";
   const startDisabled = state === "idle" && !readiness.ok;
 
   return (
-    <div className="voice-test voice-kit">
-      <div className="voice-visualizer" aria-hidden="true">
-        {[0, 1, 2, 3, 4, 5, 6].map((item) => (
-          <span key={item} className={running ? "active" : ""} style={{ "--delay": `${item * 90}ms` }} />
-        ))}
+    <div className="assistant-card-test" style={{ "--assistant-card-accent": ASSISTANT_CARD_ACCENT_HEX }}>
+      <div className="assistant-card-head">
+        <div className="assistant-card-title">
+          <h3>Pipecat Assist</h3>
+          <span className={`assistant-card-status ${statusClass}`}>{stateLabel}</span>
+        </div>
+        <div className="assistant-card-actions">
+          {running && audioBlocked && (
+            <button className="secondary" type="button" onClick={() => {
+              setAudioBlocked(false);
+              setDetail(assistantCardT("connectedDetail"));
+              attachAudio(audioRef.current?.srcObject);
+            }}>
+              {assistantCardT("enableAudio")}
+            </button>
+          )}
+          <button
+            className={`main-button ${running ? "stop" : "talk"}`}
+            type="button"
+            onClick={running ? () => stopVoiceTest() : startVoiceTest}
+            disabled={startDisabled}
+          >
+            {running ? assistantCardT("stop") : assistantCardT("talk")}
+          </button>
+        </div>
       </div>
-      <div className="voice-copy">
-        <strong>{stateLabel}</strong>
-        <span>{displayDetail}</span>
-        <audio ref={audioRef} autoPlay playsInline />
+      <div className="assistant-card-transcript-layer" aria-live="polite">
+        <div className="assistant-card-transcript-flow" ref={transcriptFlowRef}>
+          {messages.length ? (
+            messages.map((message) => (
+              <div
+                key={message.id}
+                className={`assistant-card-transcript-msg ${message.type}${message.entered ? "" : " new-message"}`}
+              >
+                <span className="assistant-card-transcript-text">{renderTranscriptText(message)}</span>
+              </div>
+            ))
+          ) : (
+            <div className="assistant-card-transcript-placeholder">{assistantCardT("greeting")}</div>
+          )}
+        </div>
       </div>
-      <div className="voice-controlbar">
-        <Button
-          icon={running ? X : Mic2}
-          variant={running ? "danger" : "primary"}
-          onClick={running ? () => stopVoiceTest() : startVoiceTest}
-          disabled={startDisabled}
-        >
-          {running ? t("Stop voice test") : t("Start voice test")}
-        </Button>
+      <div className="assistant-card-visualizer-shell" aria-hidden="true">
+        <canvas className="assistant-card-visualizer" ref={canvasRef} />
       </div>
+      <span className="assistant-card-version">v{ASSISTANT_CARD_VERSION}</span>
+      <audio ref={audioRef} autoPlay playsInline />
     </div>
   );
 }
