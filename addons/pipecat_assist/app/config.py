@@ -78,6 +78,34 @@ SECRET_FIELDS = (
     "secret_key",
     "access_key_id",
 )
+COMPOSED_STT_PROVIDER_KINDS = {
+    "soniox",
+    "deepgram",
+    "speechmatics",
+    "gradium",
+    "openai_cloud",
+}
+COMPOSED_LLM_PROVIDER_KINDS = {
+    "openai_cloud",
+    "gemini_cloud",
+    "aws_bedrock",
+    "openai_compatible",
+    "ollama",
+}
+COMPOSED_TTS_PROVIDER_KINDS = {
+    "cartesia",
+    "gradium",
+    "google_cloud_tts",
+    "google_streaming_tts",
+    "elevenlabs",
+    "openai_cloud",
+    "soniox",
+}
+COMPOSED_STEP_PROVIDER_KINDS = {
+    "stt": COMPOSED_STT_PROVIDER_KINDS,
+    "llm": COMPOSED_LLM_PROVIDER_KINDS,
+    "tts": COMPOSED_TTS_PROVIDER_KINDS,
+}
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -533,7 +561,7 @@ class FlowConfig(BaseModel):
 class RuntimeConfig(BaseModel):
     """Persisted runtime configuration edited by the web UI."""
 
-    version: int = 19
+    version: int = 20
     openai_api_key: str = ""
     text_model: str = DEFAULT_GEMINI_TEXT_MODEL
     ha_mcp_url: str = ""
@@ -1527,6 +1555,10 @@ class ConfigStore:
         if config.version < 19:
             config.version = 19
             changed = _repair_provider_defaults(config) or changed
+            changed = True
+
+        if config.version < 20:
+            config.version = 20
             changed = True
 
         for flow in config.flows:

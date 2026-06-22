@@ -1,4 +1,4 @@
-const PIPECAT_ASSIST_CARD_VERSION = "0.1.71";
+const PIPECAT_ASSIST_CARD_VERSION = "0.1.72";
 const DEFAULT_ACCENT_HEX = "#206cff";
 const DEFAULT_AUDIO_BUFFER_MS = 120;
 const STREAM_FADE_GROUPS = 4;
@@ -886,6 +886,16 @@ class PipecatAssistCard extends HTMLElement {
     return response.json();
   }
 
+  async offerErrorMessage(response) {
+    const body = await response.text();
+    try {
+      const parsed = JSON.parse(body);
+      return parsed.detail || parsed.error || body || `SmallWebRTC offer failed with HTTP ${response.status}`;
+    } catch {
+      return body || `SmallWebRTC offer failed with HTTP ${response.status}`;
+    }
+  }
+
   async waitForIce(peerConnection, timeoutMs = 2500) {
     if (peerConnection.iceGatheringState === "complete") return;
     await new Promise((resolve) => {
@@ -1398,7 +1408,7 @@ class PipecatAssistCard extends HTMLElement {
           request_data: requestData,
         }),
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) throw new Error(await this.offerErrorMessage(response));
       const answer = await response.json();
       await peer.setRemoteDescription({ sdp: answer.sdp, type: answer.type });
       this.applyRemoteAudioBuffers(peer);

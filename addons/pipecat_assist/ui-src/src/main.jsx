@@ -148,7 +148,7 @@ const OPUS_AUDIO_QUALITY_PARAMS = {
   usedtx: "0",
 };
 const OPUS_AUDIO_REMOVE_PARAMS = new Set(["stereo", "sprop-stereo"]);
-const ASSISTANT_CARD_VERSION = "0.1.71";
+const ASSISTANT_CARD_VERSION = "0.1.72";
 const ASSISTANT_CARD_ACCENT_HEX = "#206cff";
 const ASSISTANT_CARD_AUDIO_BUFFER_MS = 120;
 const STREAM_FADE_GROUPS = 4;
@@ -633,9 +633,9 @@ const stepTypes = [
 const addableStepTypes = stepTypes.filter(([kind]) => !["transport", "output"].includes(kind));
 
 const stepProviders = {
-  stt: ["soniox", "deepgram", "speechmatics", "gradium", "openai_cloud", "openai", "gemini_cloud", "gemini", "local_runtime"],
-  llm: ["openai_cloud", "gemini_cloud", "aws_bedrock", "anthropic", "azure_openai", "openai_compatible", "ollama"],
-  tts: ["cartesia", "gradium", "google_cloud_tts", "google_streaming_tts", "elevenlabs", "openai_cloud", "openai", "gemini_cloud", "gemini", "soniox", "local_runtime"],
+  stt: ["soniox", "deepgram", "speechmatics", "gradium", "openai_cloud"],
+  llm: ["openai_cloud", "gemini_cloud", "aws_bedrock", "openai_compatible", "ollama"],
+  tts: ["cartesia", "gradium", "google_cloud_tts", "google_streaming_tts", "elevenlabs", "openai_cloud", "soniox"],
   tools: ["home_assistant_mcp", "ha_mcp", "mcp_server"],
   web_search: ["web_search"],
   output: ["gemini", "openai", "aws_nova_sonic"],
@@ -2911,13 +2911,26 @@ function PipelineView({
                     }}
                   >
                     <option value="">None</option>
-                    {config.integrations
-                      .filter((integration) => canUseIntegrationForStep(selectedStep.kind, integration, derivedMode))
-                      .map((integration) => (
-                        <option key={integration.id} value={integration.id}>
-                          {integration.name}
-                        </option>
-                      ))}
+                    {(() => {
+                      const selectedIntegration = config.integrations.find((integration) => integration.id === selectedStep.integration_id);
+                      const availableIntegrations = config.integrations.filter((integration) =>
+                        canUseIntegrationForStep(selectedStep.kind, integration, derivedMode),
+                      );
+                      return (
+                        <>
+                          {selectedIntegration && !availableIntegrations.some((integration) => integration.id === selectedIntegration.id) && (
+                            <option value={selectedIntegration.id} disabled>
+                              {selectedIntegration.name} (not supported here)
+                            </option>
+                          )}
+                          {availableIntegrations.map((integration) => (
+                            <option key={integration.id} value={integration.id}>
+                              {integration.name}
+                            </option>
+                          ))}
+                        </>
+                      );
+                    })()}
                   </select>
                 </Field>
               )}

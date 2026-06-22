@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.72
+
+- Prevent composed realtime pipelines from selecting providers that are only
+  available through HA Assist bridges, such as Gemini Cloud as STT.
+- Add backend runtime preflight validation for WebRTC offers so invalid
+  STT/LLM/TTS combinations return a clear configuration error instead of a
+  Starlette/AnyIO cancel-scope traceback.
+- Fix Gemini Cloud model listing so STT no longer shows text-generation models,
+  and make Lovelace card offer errors display the server `detail` text.
+
 ## 0.1.71
 
 - Sanitize MCP JSON Schemas before exposing them as Pipecat/Gemini tools, so

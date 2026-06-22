@@ -53,6 +53,7 @@ from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.workers.runner import WorkerRunner
 
 from app.config import (
+    COMPOSED_STEP_PROVIDER_KINDS,
     DEFAULT_AWS_NOVA_SONIC_MODEL,
     DEFAULT_AWS_NOVA_SONIC_VOICE,
     DEFAULT_CARTESIA_MODEL,
@@ -530,7 +531,13 @@ async def protect_satellite_offer(request: Request, call_next):
         secret = STORE.load().satellite_shared_secret
         if secret and not hmac.compare_digest(_extract_token(request), secret):
             return JSONResponse({"detail": "Invalid satellite token"}, status_code=401)
-    return await call_next(request)
+    try:
+        return await call_next(request)
+    except Exception as err:
+        if _is_offer_path(request.url.path):
+            logger.exception("SmallWebRTC offer failed: {}", err)
+            return JSONResponse({"detail": str(err) or err.__class__.__name__}, status_code=400)
+        raise
 
 
 @app.get("/", include_in_schema=False)
@@ -753,6 +760,8 @@ async def _check_integration_mcp(
 @app.get("/api/assist/status")
 async def api_status(request: Request):
     config = STORE.load()
+    flow = config.selected_flow(None)
+    flow_errors = _runtime_flow_errors(config, flow)
     return {
         "ok": True,
         "uptime_seconds": int(time.time() - STARTED_AT),
@@ -763,6 +772,8 @@ async def api_status(request: Request):
             "offer_path": _offer_path(config),
         },
         "selected_flow_id": config.selected_flow_id,
+        "selected_flow_ready": not flow_errors,
+        "selected_flow_errors": flow_errors,
         "flow_count": len(config.flows),
         "mcp_url": config.effective_mcp_url,
         "mcp_token_configured": bool(config.effective_mcp_token),
@@ -803,8 +814,12 @@ def _static_models_for(integration: IntegrationConfig, capability: str) -> list[
         else:
             values = []
     elif integration.kind == "gemini_cloud":
-        if capability != "realtime":
+        if capability == "llm":
             values = [integration.default_model or DEFAULT_GEMINI_TEXT_MODEL]
+        elif capability == "tts":
+            values = [integration.default_tts_model or DEFAULT_GEMINI_TTS_MODEL, DEFAULT_GEMINI_TTS_MODEL]
+        else:
+            values = []
     elif integration.kind == "cartesia":
         values = [integration.default_model or DEFAULT_CARTESIA_MODEL]
     elif integration.kind == "elevenlabs":
@@ -866,6 +881,8 @@ async def api_integration_models(integration_id: str, capability: str = "llm"):
                 return {"ok": True, "models": [{"id": item, "label": item} for item in models]}
 
         if integration.kind in {"gemini", "gemini_cloud"} and integration.api_key:
+            if integration.kind == "gemini_cloud" and capability == "stt":
+                return {"ok": False, "models": fallback}
             async with httpx.AsyncClient(timeout=8.0) as client:
                 response = await client.get(
                     "https://generativelanguage.googleapis.com/v1beta/models",
@@ -879,6 +896,10 @@ async def api_integration_models(integration_id: str, capability: str = "llm"):
                 if integration.kind == "gemini" and capability == "realtime" and "live" not in name.lower():
                     continue
                 if integration.kind == "gemini_cloud" and capability == "realtime":
+                    continue
+                if integration.kind == "gemini_cloud" and capability == "tts" and "tts" not in name.lower():
+                    continue
+                if integration.kind == "gemini_cloud" and capability == "llm" and "tts" in name.lower():
                     continue
                 if integration.kind == "gemini_cloud" and "generateContent" not in methods:
                     continue
@@ -4086,6 +4107,61 @@ def _runtime_mode(flow: FlowConfig, provider_kind: str | None = None) -> str:
     return "s2s"
 
 
+def _provider_names_for_kinds(config: RuntimeConfig, kinds: set[str]) -> str:
+    names = sorted({item.name for item in config.integrations if item.kind in kinds})
+    return ", ".join(names or sorted(kinds))
+
+
+def _runtime_flow_errors(config: RuntimeConfig, flow: FlowConfig) -> list[str]:
+    """Return pipeline errors that would prevent a WebRTC runtime from starting."""
+
+    errors: list[str] = []
+    if not flow.enabled:
+        errors.append(f"Pipeline {flow.name} is disabled.")
+
+    model_integration = config.model_integration(flow)
+    provider_kind = model_integration.kind if model_integration else flow.provider_id
+    runtime_mode = _runtime_mode(flow, provider_kind)
+
+    if runtime_mode == "s2s":
+        if provider_kind not in {"openai", "gemini", "aws_nova_sonic"}:
+            errors.append(f"Realtime speech-to-speech runtime for {provider_kind} is not supported.")
+        if any(step.kind in {"stt", "tts"} and step.enabled for step in flow.steps):
+            errors.append("Speech-to-speech pipelines cannot use separate STT or TTS steps.")
+        return errors
+
+    role_labels = {"stt": "STT", "llm": "LLM", "tts": "TTS"}
+    for kind, supported_kinds in COMPOSED_STEP_PROVIDER_KINDS.items():
+        step, integration = _step_integration(config, flow, kind)
+        label = role_labels[kind]
+        if not step:
+            errors.append(f"Composed pipeline needs an enabled {label} step.")
+            continue
+        if not step.integration_id:
+            errors.append(f"{step.label or label} needs an integration.")
+            continue
+        if not integration:
+            errors.append(f"{step.label or label} uses missing integration {step.integration_id}.")
+            continue
+        if integration.kind not in supported_kinds:
+            supported_names = _provider_names_for_kinds(config, supported_kinds)
+            if kind == "stt" and integration.kind == "gemini_cloud":
+                errors.append(
+                    "Google Gemini Cloud can transcribe buffered HA Assist audio, but it is not "
+                    f"a composed realtime STT processor. Use one of: {supported_names}."
+                )
+            else:
+                errors.append(
+                    f"{integration.name} cannot be used as {label} in composed realtime pipelines. "
+                    f"Use one of: {supported_names}."
+                )
+            continue
+        if not integration.enabled:
+            errors.append(f"{integration.name} is disabled.")
+
+    return errors
+
+
 def _runner_body(runner_args: RunnerArguments) -> dict[str, Any]:
     body = runner_args.body if isinstance(runner_args.body, dict) else {}
     request_data = body.get("request_data")
@@ -4936,6 +5012,9 @@ async def bot(runner_args: RunnerArguments):
     config = STORE.load()
     body = _runner_body(runner_args)
     flow = config.selected_flow(body.get("flow_id"))
+    flow_errors = _runtime_flow_errors(config, flow)
+    if flow_errors:
+        raise RuntimeError(flow_errors[0])
     transport = await create_transport(runner_args, _transport_params(flow))
     await run_bot(transport, runner_args, config, flow, mcp_token=config.effective_mcp_token)
 
