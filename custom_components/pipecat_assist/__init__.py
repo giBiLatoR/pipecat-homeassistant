@@ -18,6 +18,15 @@ CARD_RESOURCE_PATH = "/pipecat_assist/pipecat-assist-card.js"
 CARD_MODULE_URL = f"{CARD_RESOURCE_PATH}?v={VERSION}"
 
 
+def _is_pipecat_card_resource_url(url: str) -> bool:
+    """Return true for old or current Pipecat Assist Lovelace card resources."""
+
+    path = url.split("?")[0]
+    return path == CARD_RESOURCE_PATH or (
+        path.endswith("/pipecat-assist-card.js") and "pipecat" in path
+    )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Pipecat Assist from a config entry."""
 
@@ -77,15 +86,26 @@ async def _async_register_lovelace_resource(hass: HomeAssistant) -> None:
         await resources.async_load()
         resources.loaded = True
 
-    for item in resources.async_items() or []:
-        url = str(item.get(CONF_URL, ""))
-        if url.split("?")[0] != CARD_RESOURCE_PATH:
-            continue
-        if url != CARD_MODULE_URL and hasattr(resources, "async_update_item"):
+    card_resources = [
+        item
+        for item in resources.async_items() or []
+        if _is_pipecat_card_resource_url(str(item.get(CONF_URL, "")))
+    ]
+    for item in card_resources:
+        if (
+            str(item.get(CONF_URL, "")) != CARD_MODULE_URL
+            and hasattr(resources, "async_update_item")
+        ):
             await resources.async_update_item(
                 item["id"],
                 {CONF_RESOURCE_TYPE_WS: "module", CONF_URL: CARD_MODULE_URL},
             )
+
+    for item in card_resources[1:]:
+        if hasattr(resources, "async_delete_item"):
+            await resources.async_delete_item(item["id"])
+
+    if card_resources:
         return
 
     await resources.async_create_item(

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.58
+
+- Force-refresh existing Lovelace card instances after the new module loads,
+  including cards nested in Home Assistant shadow DOM.
+- Add an unobtrusive card version marker so stale frontend assets are
+  immediately visible during troubleshooting.
+- Update and deduplicate Pipecat Assist Lovelace resources registered by the
+  custom component.
+
 ## 0.1.57
 
 - Fixed the Lovelace card upgrade path so a newly loaded card module patches an

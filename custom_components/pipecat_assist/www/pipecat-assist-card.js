@@ -1,4 +1,4 @@
-const PIPECAT_ASSIST_CARD_VERSION = "0.1.57";
+const PIPECAT_ASSIST_CARD_VERSION = "0.1.58";
 const HA_ASSIST_SAMPLE_RATE_FALLBACK = 48000;
 const OPUS_AUDIO_QUALITY_PARAMS = {
   minptime: "20",
@@ -585,9 +585,19 @@ class PipecatAssistCard extends HTMLElement {
           box-shadow: 0 0 28px rgba(84, 145, 255, 0.9), inset 0 0 30px rgba(84, 145, 255, 0.28);
           pointer-events: none;
         }
-        .head, .actions, .transcript, .wave {
+        .head, .actions, .transcript, .wave, .version {
           position: relative;
           z-index: 1;
+        }
+        .version {
+          position: absolute;
+          right: 14px;
+          bottom: 12px;
+          color: rgba(226, 239, 255, 0.48);
+          font-size: 10px;
+          line-height: 1;
+          letter-spacing: 0;
+          pointer-events: none;
         }
         .head {
           display: flex;
@@ -702,6 +712,7 @@ class PipecatAssistCard extends HTMLElement {
               return `<span style="--delay:${item * 95}ms;--y:${y}px;--yn:${-y}px;--r:${r}deg;--rn:${-r}deg"></span>`;
             }).join("")}
           </div>
+          <span class="version">v${PIPECAT_ASSIST_CARD_VERSION}</span>
           <audio autoplay playsinline></audio>
         </div>
       </ha-card>
@@ -734,12 +745,83 @@ function patchPipecatAssistCard(existingCard) {
   existingCard.__pipecatAssistVersion = PIPECAT_ASSIST_CARD_VERSION;
 }
 
+function collectPipecatAssistCards(root, cards = new Set(), seen = new Set()) {
+  if (!root || seen.has(root)) return cards;
+  seen.add(root);
+  if (root.localName === "pipecat-assist-card") cards.add(root);
+  if (!root.querySelectorAll) return cards;
+
+  root.querySelectorAll("pipecat-assist-card").forEach((card) => cards.add(card));
+  root.querySelectorAll("*").forEach((element) => {
+    if (element.shadowRoot) collectPipecatAssistCards(element.shadowRoot, cards, seen);
+  });
+  return cards;
+}
+
+function refreshPipecatAssistCard(card) {
+  if (!card || card.__pipecatAssistVersion === PIPECAT_ASSIST_CARD_VERSION) return;
+  card.__pipecatAssistVersion = PIPECAT_ASSIST_CARD_VERSION;
+  card.config = card.config || { name: "Pipecat Assist" };
+  card.state = card.state || "idle";
+  card.detail = card.detail || "Ready";
+  card.userTranscript = card.userTranscript || "";
+  card.partialTranscript = card.partialTranscript || "";
+  card.assistantTranscript = card.assistantTranscript || "";
+  card.audioBlocked = Boolean(card.audioBlocked);
+  if (!card.shadowRoot && card.attachShadow) {
+    try {
+      card.attachShadow({ mode: "open" });
+    } catch {
+      // The element may already have a closed shadow root from an older card.
+    }
+  }
+  if (typeof card.render === "function") card.render();
+}
+
+function refreshPipecatAssistCards() {
+  collectPipecatAssistCards(document).forEach(refreshPipecatAssistCard);
+}
+
+function installPipecatAssistCardRefresher() {
+  if (window.__pipecatAssistCardRefresherInstalled) return;
+  window.__pipecatAssistCardRefresherInstalled = true;
+  let pending = false;
+  const observedRoots = new WeakSet();
+  let observer;
+  const observeRoots = (root, seen = new Set()) => {
+    if (!root || seen.has(root)) return;
+    seen.add(root);
+    if (!observedRoots.has(root)) {
+      observedRoots.add(root);
+      observer.observe(root, { childList: true, subtree: true });
+    }
+    if (!root.querySelectorAll) return;
+    root.querySelectorAll("*").forEach((element) => {
+      if (element.shadowRoot) observeRoots(element.shadowRoot, seen);
+    });
+  };
+  const schedule = () => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      observeRoots(document);
+      refreshPipecatAssistCards();
+    });
+  };
+  observer = new MutationObserver(schedule);
+  observeRoots(document);
+  [0, 250, 1000, 3000].forEach((delay) => setTimeout(schedule, delay));
+}
+
 const existingPipecatAssistCard = customElements.get("pipecat-assist-card");
 if (existingPipecatAssistCard) {
   patchPipecatAssistCard(existingPipecatAssistCard);
 } else {
   customElements.define("pipecat-assist-card", PipecatAssistCard);
 }
+installPipecatAssistCardRefresher();
+refreshPipecatAssistCards();
 
 window.customCards = Array.isArray(window.customCards) ? window.customCards : [];
 const existingCardIndex = window.customCards.findIndex((card) => card.type === "pipecat-assist-card");
