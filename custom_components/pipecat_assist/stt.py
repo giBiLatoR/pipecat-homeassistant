@@ -324,33 +324,36 @@ class PipecatAssistSpeechToTextEntity(stt.SpeechToTextEntity):
                 pass
             await websocket.send_json({"type": "end"})
 
-            async with asyncio.timeout(WEBSOCKET_RESULT_TIMEOUT_SECONDS):
-                async for message in websocket:
-                    if message.type == aiohttp.WSMsgType.TEXT:
-                        try:
-                            data = json.loads(message.data)
-                        except ValueError:
-                            continue
-                        if data.get("type") == "final":
-                            return stt.SpeechResult(
-                                text=data.get("text") or "",
-                                result=stt.SpeechResultState.SUCCESS,
-                            )
-                        if data.get("type") == "error":
-                            return stt.SpeechResult(
-                                text=data.get("detail") or "Pipecat Assist STT failed.",
-                                result=stt.SpeechResultState.ERROR,
-                            )
-                    elif message.type in {
-                        aiohttp.WSMsgType.CLOSE,
-                        aiohttp.WSMsgType.CLOSED,
-                        aiohttp.WSMsgType.ERROR,
-                    }:
-                        break
+            try:
+                async with asyncio.timeout(WEBSOCKET_RESULT_TIMEOUT_SECONDS):
+                    async for message in websocket:
+                        if message.type == aiohttp.WSMsgType.TEXT:
+                            try:
+                                data = json.loads(message.data)
+                            except ValueError:
+                                continue
+                            if data.get("type") == "final":
+                                return stt.SpeechResult(
+                                    text=data.get("text") or "",
+                                    result=stt.SpeechResultState.SUCCESS,
+                                )
+                            if data.get("type") == "error":
+                                return stt.SpeechResult(
+                                    text=data.get("detail") or "Pipecat Assist STT failed.",
+                                    result=stt.SpeechResultState.ERROR,
+                                )
+                        elif message.type in {
+                            aiohttp.WSMsgType.CLOSE,
+                            aiohttp.WSMsgType.CLOSED,
+                            aiohttp.WSMsgType.ERROR,
+                        }:
+                            break
+            except TimeoutError:
+                return stt.SpeechResult(text="", result=stt.SpeechResultState.SUCCESS)
 
         return stt.SpeechResult(
-            text="Pipecat Assist STT stream closed before a transcript was returned.",
-            result=stt.SpeechResultState.ERROR,
+            text="",
+            result=stt.SpeechResultState.SUCCESS,
         )
 
     async def async_process_audio_stream(

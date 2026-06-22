@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.57
+
+- Fixed the Lovelace card upgrade path so a newly loaded card module patches an
+  already registered older custom element instead of leaving the old UI active.
+- Added browser-side speech recognition in the Lovelace card when available, so
+  live user transcription and end-of-conversation phrases work even when the
+  provider does not send transcript events over the data channel.
+- Treat empty/no-speech HA Assist STT turns as a clean empty result instead of
+  surfacing a `speech-to-text failed` error after conversation shutdown.
+
 ## 0.1.56
 
 - Added a Home Assistant AI Tasks entity backed by the selected Pipecat Assist

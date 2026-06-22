@@ -1,4 +1,4 @@
-const PIPECAT_ASSIST_CARD_VERSION = "0.1.56";
+const PIPECAT_ASSIST_CARD_VERSION = "0.1.57";
 const HA_ASSIST_SAMPLE_RATE_FALLBACK = 48000;
 const OPUS_AUDIO_QUALITY_PARAMS = {
   minptime: "20",
@@ -154,6 +154,7 @@ class PipecatAssistCard extends HTMLElement {
     this.detail = "Ready";
     this.remoteStream = undefined;
     this.audioBlocked = false;
+    this.localSpeechEnding = false;
     this.userTranscript = "";
     this.assistantTranscript = "";
     this.partialTranscript = "";
@@ -248,6 +249,66 @@ class PipecatAssistCard extends HTMLElement {
     }
   }
 
+  startLocalSpeechRecognition() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+    this.stopLocalSpeechRecognition();
+    try {
+      const recognition = new SpeechRecognition();
+      this.localSpeechEnding = false;
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = String(this.sessionLanguage() || navigator.language || "en").replace("_", "-");
+      recognition.onresult = (event) => {
+        let finalText = "";
+        let interimText = "";
+        for (let index = event.resultIndex; index < event.results.length; index += 1) {
+          const result = event.results[index];
+          const text = result?.[0]?.transcript || "";
+          if (!text) continue;
+          if (result.isFinal) finalText = appendTranscript(finalText, text);
+          else interimText = appendTranscript(interimText, text);
+        }
+        if (finalText) this.userTranscript = appendTranscript(this.userTranscript, finalText);
+        this.partialTranscript = interimText;
+        this.render();
+        if (shouldEndConversation(`${this.userTranscript} ${this.partialTranscript}`)) {
+          window.setTimeout(() => this.stop(), 250);
+        }
+      };
+      recognition.onerror = () => {
+        this.partialTranscript = "";
+        this.render();
+      };
+      recognition.onend = () => {
+        this.localSpeechRecognition = undefined;
+        if (this.localSpeechEnding || !["requesting", "connecting", "connected"].includes(this.state)) return;
+        window.setTimeout(() => this.startLocalSpeechRecognition(), 250);
+      };
+      this.localSpeechRecognition = recognition;
+      recognition.start();
+    } catch {
+      this.localSpeechRecognition = undefined;
+    }
+  }
+
+  stopLocalSpeechRecognition() {
+    const recognition = this.localSpeechRecognition;
+    this.localSpeechRecognition = undefined;
+    this.localSpeechEnding = true;
+    if (!recognition) return;
+    try {
+      recognition.onend = null;
+      recognition.stop();
+    } catch {
+      try {
+        recognition.abort();
+      } catch {
+        // Ignore browser-specific SpeechRecognition teardown errors.
+      }
+    }
+  }
+
   async waitForAudioSessionRelease() {
     const elapsed = Date.now() - (this.lastStoppedAt || 0);
     const remaining = Math.max(0, 450 - elapsed);
@@ -278,6 +339,7 @@ class PipecatAssistCard extends HTMLElement {
     });
     this.peer?.close();
     this.peer = undefined;
+    this.stopLocalSpeechRecognition();
     this.stream?.getTracks().forEach((track) => track.stop());
     this.stream = undefined;
     this.remoteStream?.getTracks().forEach((track) => track.stop());
@@ -317,6 +379,7 @@ class PipecatAssistCard extends HTMLElement {
         audio: { autoGainControl: true, echoCancellation: true, noiseSuppression: true },
         video: false,
       });
+      this.startLocalSpeechRecognition();
 
       const peer = new RTCPeerConnection();
       this.peer = peer;
@@ -449,7 +512,7 @@ class PipecatAssistCard extends HTMLElement {
       this.userTranscript = finalEvent ? appendTranscript(this.userTranscript, text) : appendTranscript("", text);
       this.partialTranscript = finalEvent ? "" : text;
       this.render();
-      if (finalEvent && shouldEndConversation(this.userTranscript)) {
+      if (shouldEndConversation(`${this.userTranscript} ${this.partialTranscript}`)) {
         window.setTimeout(() => this.stop(), 450);
       }
       return;
@@ -658,7 +721,23 @@ class PipecatAssistCard extends HTMLElement {
   }
 }
 
-if (!customElements.get("pipecat-assist-card")) {
+function patchPipecatAssistCard(existingCard) {
+  for (const name of Object.getOwnPropertyNames(PipecatAssistCard.prototype)) {
+    if (name === "constructor") continue;
+    Object.defineProperty(
+      existingCard.prototype,
+      name,
+      Object.getOwnPropertyDescriptor(PipecatAssistCard.prototype, name),
+    );
+  }
+  existingCard.getStubConfig = PipecatAssistCard.getStubConfig;
+  existingCard.__pipecatAssistVersion = PIPECAT_ASSIST_CARD_VERSION;
+}
+
+const existingPipecatAssistCard = customElements.get("pipecat-assist-card");
+if (existingPipecatAssistCard) {
+  patchPipecatAssistCard(existingPipecatAssistCard);
+} else {
   customElements.define("pipecat-assist-card", PipecatAssistCard);
 }
 

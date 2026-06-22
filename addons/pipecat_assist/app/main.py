@@ -1112,7 +1112,10 @@ async def _handle_ha_live_stt_stream(
     if turn.error:
         raise HTTPException(status_code=502, detail=f"Pipecat Live Bridge failed: {turn.error}")
     if not transcript:
-        raise HTTPException(status_code=502, detail="Pipecat Live Bridge returned no transcript")
+        logger.info("Pipecat Live Bridge returned no transcript for flow {}; treating as no speech", flow.id)
+        await websocket.send_json({"type": "final", "text": ""})
+        await websocket.close()
+        return
 
     await websocket.send_json({"type": "final", "text": transcript.strip()})
     await websocket.close()
@@ -1236,18 +1239,20 @@ async def api_stt_stream(websocket: WebSocket):
 
         if not transcript:
             if streaming_kind:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"{integration.name} streaming STT returned no transcript",
+                logger.info(
+                    "HA Assist streaming STT returned no transcript flow={} integration={}; treating as no speech",
+                    flow.id,
+                    integration.name,
                 )
-            result = await _transcribe_audio_bytes(
-                config=config,
-                flow=flow,
-                audio=audio,
-                metadata=metadata,
-                content_type=content_type,
-            )
-            transcript = result.get("text", "")
+            else:
+                result = await _transcribe_audio_bytes(
+                    config=config,
+                    flow=flow,
+                    audio=audio,
+                    metadata=metadata,
+                    content_type=content_type,
+                )
+                transcript = result.get("text", "")
 
         logger.info(
             "HA Assist STT stream finished flow={} transcript={}",
