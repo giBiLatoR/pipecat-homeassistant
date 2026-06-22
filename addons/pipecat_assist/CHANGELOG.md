@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.60
+
+- Fix Lovelace card RTVI transcript routing so `user-llm-text` is displayed as
+  user text instead of being misclassified as an assistant LLM response.
+- Prefer higher-quality bot transcript events (`bot-output`/`bot-transcription`)
+  over lower-level LLM/TTS token streams within the same assistant turn to avoid
+  duplicated responses.
+- Add echo suppression for browser-local speech recognition when it hears the
+  assistant audio.
+- Normalize short transcript chunks with safer spacing so words like "czym moge"
+  are not merged into one word.
+
 ## 0.1.59
 
 - Fix Lovelace card transcript merging so local browser transcripts and Pipecat

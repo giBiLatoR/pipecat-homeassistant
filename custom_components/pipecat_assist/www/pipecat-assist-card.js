@@ -1,4 +1,4 @@
-const PIPECAT_ASSIST_CARD_VERSION = "0.1.59";
+const PIPECAT_ASSIST_CARD_VERSION = "0.1.60";
 const HA_ASSIST_SAMPLE_RATE_FALLBACK = 48000;
 const OPUS_AUDIO_QUALITY_PARAMS = {
   minptime: "20",
@@ -62,7 +62,6 @@ function transcriptJoiner(existing, incoming, rawIncoming) {
   if (/^[,.;:!?%…)\]}]/.test(incoming)) return "";
   if (/[(\[{]$/.test(existing)) return "";
   if (/[-/–—]$/.test(existing) || /^[-/–—]/.test(incoming)) return "";
-  if (incoming.length <= 3 && /\p{L}$/u.test(existing) && /^\p{L}/u.test(incoming)) return "";
   return " ";
 }
 
@@ -89,6 +88,52 @@ function mergeTranscript(existing, chunk) {
 
   const joiner = transcriptJoiner(current, text, rawText);
   return normalizeTranscriptText(`${current}${joiner}${text}`);
+}
+
+function transcriptWords(value) {
+  return normalizeTranscriptText(value)
+    .toLocaleLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((word) => word.length > 2);
+}
+
+function isLikelyTranscriptEcho(text, reference) {
+  const incoming = compactTranscript(text);
+  const existing = compactTranscript(reference);
+  if (incoming.length < 6 || existing.length < 6) return false;
+  if (existing.includes(incoming)) return true;
+
+  const incomingWords = transcriptWords(text);
+  if (incomingWords.length < 2) return false;
+  const existingWords = new Set(transcriptWords(reference));
+  const matched = incomingWords.filter((word) => existingWords.has(word)).length;
+  return matched >= 2 && matched / incomingWords.length >= 0.75;
+}
+
+function firstString(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return "";
+}
+
+function rtviAssistantTextPriority(type) {
+  if (type === "bot-output") return 4;
+  if (type === "bot-transcription") return 3;
+  if (type === "bot-tts-text") return 2;
+  if (type === "bot-llm-text") return 1;
+  if (type.startsWith("assistant-")) return 2;
+  return 0;
+}
+
+function isRtviUserTextType(type) {
+  return type === "user-transcription"
+    || type === "user-llm-text"
+    || type.startsWith("user-");
+}
+
+function isRtviAssistantTextType(type) {
+  return rtviAssistantTextPriority(type) > 0;
 }
 
 function shouldEndConversation(text) {
@@ -206,6 +251,12 @@ class PipecatAssistCard extends HTMLElement {
     this.userTranscript = "";
     this.assistantTranscript = "";
     this.partialTranscript = "";
+    this.assistantTurnBase = "";
+    this.assistantTurnText = "";
+    this.assistantTurnPriority = 0;
+    this.assistantTurnActive = false;
+    this.botSpeaking = false;
+    this.ignoreLocalSpeechUntil = 0;
     this.render();
   }
 
@@ -473,6 +524,7 @@ class PipecatAssistCard extends HTMLElement {
           if (result.isFinal) finalText = mergeTranscript(finalText, text);
           else interimText = mergeTranscript(interimText, text);
         }
+        if (this.shouldIgnoreLocalSpeech(finalText || interimText)) return;
         if (finalText) this.userTranscript = mergeTranscript(this.userTranscript, finalText);
         this.partialTranscript = normalizeTranscriptText(interimText);
         this.render();
@@ -545,6 +597,7 @@ class PipecatAssistCard extends HTMLElement {
     this.peer = undefined;
     this.stopLocalSpeechRecognition();
     this.stopVisualizer();
+    this.finishAssistantTurn();
     this.stream?.getTracks().forEach((track) => track.stop());
     this.stream = undefined;
     this.remoteStream?.getTracks().forEach((track) => track.stop());
@@ -576,6 +629,12 @@ class PipecatAssistCard extends HTMLElement {
       this.userTranscript = "";
       this.assistantTranscript = "";
       this.partialTranscript = "";
+      this.assistantTurnBase = "";
+      this.assistantTurnText = "";
+      this.assistantTurnPriority = 0;
+      this.assistantTurnActive = false;
+      this.botSpeaking = false;
+      this.ignoreLocalSpeechUntil = 0;
       this.render();
       this.resetAudioElement();
       await this.waitForAudioSessionRelease();
@@ -675,19 +734,106 @@ class PipecatAssistCard extends HTMLElement {
   textFromEvent(data) {
     if (!data || typeof data !== "object") return "";
     const nested = data.data && typeof data.data === "object" ? data.data : {};
-    return String(
-      data.text
-      || data.transcript
-      || data.message
-      || data.content
-      || data.delta
-      || nested.text
-      || nested.transcript
-      || nested.message
-      || nested.content
-      || nested.delta
-      || "",
+    return firstString(
+      data.text,
+      data.transcript,
+      data.message,
+      data.content,
+      data.delta,
+      nested.text,
+      nested.transcript,
+      nested.message,
+      nested.content,
+      nested.delta,
     );
+  }
+
+  beginAssistantTurn() {
+    if (this.assistantTurnFinishTimer) {
+      clearTimeout(this.assistantTurnFinishTimer);
+      this.assistantTurnFinishTimer = undefined;
+    }
+    if (this.assistantTurnActive) {
+      this.botSpeaking = true;
+      this.ignoreLocalSpeechUntil = Date.now() + 1200;
+      return;
+    }
+    this.assistantTurnBase = normalizeTranscriptText(this.assistantTranscript);
+    this.assistantTurnText = "";
+    this.assistantTurnPriority = 0;
+    this.assistantTurnActive = true;
+    this.botSpeaking = true;
+    this.ignoreLocalSpeechUntil = Date.now() + 1200;
+  }
+
+  finishAssistantTurn() {
+    if (this.assistantTurnFinishTimer) {
+      clearTimeout(this.assistantTurnFinishTimer);
+      this.assistantTurnFinishTimer = undefined;
+    }
+    this.assistantTranscript = normalizeTranscriptText(this.assistantTranscript);
+    this.assistantTurnBase = this.assistantTranscript;
+    this.assistantTurnText = "";
+    this.assistantTurnPriority = 0;
+    this.assistantTurnActive = false;
+    this.botSpeaking = false;
+    this.ignoreLocalSpeechUntil = Date.now() + 900;
+  }
+
+  scheduleAssistantTurnFinish(delayMs = 1000) {
+    if (this.assistantTurnFinishTimer) clearTimeout(this.assistantTurnFinishTimer);
+    this.botSpeaking = false;
+    this.ignoreLocalSpeechUntil = Date.now() + delayMs;
+    this.assistantTurnFinishTimer = window.setTimeout(() => this.finishAssistantTurn(), delayMs);
+  }
+
+  ensureAssistantTurn() {
+    if (!this.assistantTurnActive) this.beginAssistantTurn();
+  }
+
+  shouldIgnoreLocalSpeech(text) {
+    if (!text) return false;
+    const assistantReference = mergeTranscript(this.assistantTranscript, this.assistantTurnText);
+    if (!assistantReference) return false;
+    return (this.botSpeaking || Date.now() < (this.ignoreLocalSpeechUntil || 0))
+      && isLikelyTranscriptEcho(text, assistantReference);
+  }
+
+  applyUserText(text, finalEvent) {
+    if (isLikelyTranscriptEcho(text, this.assistantTranscript)) return;
+    if (finalEvent) {
+      this.userTranscript = mergeTranscript(this.userTranscript, text);
+      this.partialTranscript = "";
+    } else {
+      this.partialTranscript = normalizeTranscriptText(text);
+    }
+    this.render();
+    if (shouldEndConversation(`${this.userTranscript} ${this.partialTranscript}`)) {
+      window.setTimeout(() => this.stop(), 450);
+    }
+  }
+
+  applyAssistantText(text, priority) {
+    if (isLikelyTranscriptEcho(text, mergeTranscript(this.userTranscript, this.partialTranscript))) return;
+    this.ensureAssistantTurn();
+    if (this.assistantTurnFinishTimer) {
+      clearTimeout(this.assistantTurnFinishTimer);
+      this.assistantTurnFinishTimer = undefined;
+    }
+    if (priority > (this.assistantTurnPriority || 0)) {
+      this.assistantTurnPriority = priority;
+      this.assistantTurnText = normalizeTranscriptText(text);
+    } else if (priority === this.assistantTurnPriority) {
+      this.assistantTurnText = mergeTranscript(this.assistantTurnText, text);
+    } else {
+      return;
+    }
+    this.assistantTranscript = mergeTranscript(this.assistantTurnBase, this.assistantTurnText);
+    this.ignoreLocalSpeechUntil = Date.now() + 1200;
+    this.render();
+    if (shouldEndConversation(this.assistantTranscript)) {
+      window.setTimeout(() => this.stop(), 650);
+    }
   }
 
   handleRealtimeMessage(raw) {
@@ -700,37 +846,27 @@ class PipecatAssistCard extends HTMLElement {
     }
     const type = String(message.type || message.event || message.name || "").toLowerCase();
     const label = String(message.label || "").toLowerCase();
+    if (type === "bot-llm-started" || type === "bot-tts-started" || type === "bot-started-speaking") {
+      this.beginAssistantTurn();
+    }
+    if (type === "bot-llm-stopped" || type === "bot-tts-stopped" || type === "bot-stopped-speaking") {
+      this.scheduleAssistantTurnFinish();
+    }
+
     const text = this.textFromEvent(message);
     if (!text) return;
 
-    const userEvent =
-      type.includes("user") ||
-      type.includes("input") ||
-      type.includes("transcription") && !type.includes("bot") && !type.includes("assistant");
-    const assistantEvent =
-      type.includes("assistant") ||
-      type.includes("bot") ||
-      type.includes("output") ||
-      type.includes("llm") ||
-      label.includes("bot");
-    const finalEvent = type.includes("final") || message.data?.final || message.is_final || message.final;
+    const finalEvent = type === "user-llm-text"
+      || type.includes("final")
+      || Boolean(message.data?.final || message.is_final || message.final);
 
-    if (userEvent && !assistantEvent) {
-      this.userTranscript = finalEvent ? mergeTranscript(this.userTranscript, text) : this.userTranscript;
-      this.partialTranscript = finalEvent ? "" : normalizeTranscriptText(text);
-      this.render();
-      if (shouldEndConversation(`${this.userTranscript} ${this.partialTranscript}`)) {
-        window.setTimeout(() => this.stop(), 450);
-      }
+    if (isRtviUserTextType(type)) {
+      this.applyUserText(text, finalEvent);
       return;
     }
 
-    if (assistantEvent) {
-      this.assistantTranscript = mergeTranscript(this.assistantTranscript, text);
-      this.render();
-      if (shouldEndConversation(this.assistantTranscript)) {
-        window.setTimeout(() => this.stop(), 650);
-      }
+    if (isRtviAssistantTextType(type) || (label.includes("bot") && !type.startsWith("user-"))) {
+      this.applyAssistantText(text, rtviAssistantTextPriority(type) || 1);
     }
   }
 
