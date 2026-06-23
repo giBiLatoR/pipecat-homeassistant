@@ -87,6 +87,7 @@ COMPOSED_STT_PROVIDER_KINDS = {
     "deepgram",
     "speechmatics",
     "gradium",
+    "local_runtime",
     "openai_cloud",
 }
 COMPOSED_LLM_PROVIDER_KINDS = {
@@ -102,6 +103,7 @@ COMPOSED_TTS_PROVIDER_KINDS = {
     "google_cloud_tts",
     "google_streaming_tts",
     "elevenlabs",
+    "local_runtime",
     "openai_cloud",
     "soniox",
 }

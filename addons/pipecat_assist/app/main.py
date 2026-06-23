@@ -28,7 +28,13 @@ from starlette.staticfiles import StaticFiles
 
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
-from pipecat.frames.frames import ErrorFrame, LLMRunFrame, URLImageRawFrame
+from pipecat.frames.frames import (
+    ErrorFrame,
+    LLMRunFrame,
+    TranscriptionFrame,
+    TTSAudioRawFrame,
+    URLImageRawFrame,
+)
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -37,6 +43,8 @@ from pipecat.processors.frameworks.rtvi import RTVIObserverParams
 from pipecat.runner.run import app, main as runner_main
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
+from pipecat.services.settings import STTSettings, TTSSettings
+from pipecat.services.stt_service import SegmentedSTTService
 from pipecat.services.openai.realtime.events import (
     AudioConfiguration,
     AudioInput,
@@ -49,8 +57,10 @@ from pipecat.services.openai.realtime.events import (
     TurnDetection,
 )
 from pipecat.services.openai.realtime.llm import OpenAIRealtimeLLMService
+from pipecat.services.tts_service import TTSService
 from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
+from pipecat.utils.time import time_now_iso8601
 from pipecat.workers.runner import WorkerRunner
 
 from app.config import (
@@ -1930,6 +1940,123 @@ async def _local_runtime_tts(
     audio = base64.b64decode(str(encoded))
     declared_type = str(data.get("media_type") or data.get("mime_type") or "audio/wav")
     return _normalize_inline_audio(audio, declared_type)
+
+
+def _wav_pcm16_payload(audio: bytes) -> tuple[bytes, int, int]:
+    with wave.open(BytesIO(audio), "rb") as reader:
+        sample_width = reader.getsampwidth()
+        channels = reader.getnchannels()
+        if sample_width != 2:
+            raise RuntimeError(f"Local runtime WAV must be 16-bit PCM, got {sample_width * 8}-bit")
+        if channels != 1:
+            raise RuntimeError(f"Local runtime WAV must be mono, got {channels} channels")
+        return reader.readframes(reader.getnframes()), reader.getframerate(), channels
+
+
+class _LocalRuntimeSTTService(SegmentedSTTService):
+    def __init__(
+        self,
+        *,
+        integration: IntegrationConfig,
+        model: str,
+        language: str,
+    ) -> None:
+        self._integration = integration
+        self._model = model
+        self._language = language
+        super().__init__(
+            settings=STTSettings(
+                model=model or None,
+                language=_pipecat_language(language),
+            ),
+        )
+
+    async def run_stt(self, audio: bytes):
+        await self.start_processing_metrics()
+        language = _pipecat_language(self._language)
+        try:
+            transcript = await _local_runtime_transcribe(
+                integration=self._integration,
+                audio=audio,
+                content_type="audio/wav",
+                metadata={"sample_rate": self.sample_rate, "language": self._language},
+                model=self._model,
+            )
+        except Exception as err:
+            yield ErrorFrame(error=f"Local runtime STT failed: {err}")
+            return
+        finally:
+            await self.stop_processing_metrics()
+
+        if transcript:
+            logger.debug("Local runtime transcription: [{}]", transcript)
+            yield TranscriptionFrame(
+                transcript,
+                self._user_id,
+                time_now_iso8601(),
+                language if isinstance(language, Language) else None,
+            )
+
+
+class _LocalRuntimeTTSService(TTSService):
+    def __init__(
+        self,
+        *,
+        integration: IntegrationConfig,
+        model: str,
+        voice: str,
+        language: str,
+        speed: float,
+        text_aggregation_mode,
+    ) -> None:
+        self._integration = integration
+        self._model = model
+        self._voice = voice
+        self._language = language
+        self._speed = speed
+        super().__init__(
+            push_start_frame=True,
+            push_stop_frames=True,
+            text_aggregation_mode=text_aggregation_mode,
+            settings=TTSSettings(
+                model=model or None,
+                voice=voice or None,
+                language=_pipecat_language(language),
+            ),
+        )
+
+    async def run_tts(self, text: str, context_id: str):
+        text = text.strip()
+        if not text:
+            return
+
+        await self.start_tts_usage_metrics(text)
+        try:
+            audio, media_type, _ = await _local_runtime_tts(
+                integration=self._integration,
+                text=text,
+                model=self._model,
+                voice=self._voice,
+                language=self._language,
+                speed=self._speed,
+            )
+            if "wav" not in media_type and not audio.startswith(b"RIFF"):
+                raise RuntimeError(f"Local runtime TTS returned unsupported media type {media_type}")
+            pcm, sample_rate, channels = _wav_pcm16_payload(audio)
+            if sample_rate != self.sample_rate:
+                pcm = await self._resampler.resample(pcm, sample_rate, self.sample_rate)
+                sample_rate = self.sample_rate
+            await self.stop_ttfb_metrics()
+            yield TTSAudioRawFrame(
+                audio=pcm,
+                sample_rate=sample_rate,
+                num_channels=channels,
+                context_id=context_id,
+            )
+        except Exception as err:
+            yield ErrorFrame(error=f"Local runtime TTS failed: {err}")
+        finally:
+            await self.stop_ttfb_metrics()
 
 
 def _google_tts_language_code(voice: str, language: str) -> str:
@@ -4430,6 +4557,12 @@ def _build_stt_service(
             api_key=_integration_api_key(integration, "STT"),
             settings=GradiumSTTService.Settings(model=model or None),
         )
+    if integration.kind == "local_runtime":
+        return _LocalRuntimeSTTService(
+            integration=integration,
+            model=model,
+            language=language,
+        )
     if integration.kind in {"openai", "openai_cloud"}:
         from pipecat.services.openai.stt import OpenAIRealtimeSTTService
 
@@ -4612,6 +4745,15 @@ def _build_tts_service(config: RuntimeConfig, flow: FlowConfig):
             api_key=_integration_api_key(integration, "TTS"),
             text_aggregation_mode=text_aggregation_mode,
             settings=SonioxTTSService.Settings(voice=voice or None),
+        )
+    if integration.kind == "local_runtime":
+        return _LocalRuntimeTTSService(
+            integration=integration,
+            model=model,
+            voice=voice,
+            language=_runtime_language(flow, integration),
+            speed=speed,
+            text_aggregation_mode=text_aggregation_mode,
         )
 
     raise RuntimeError(f"TTS provider {integration.kind} is not supported by composed runtime")

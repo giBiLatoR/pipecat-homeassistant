@@ -148,7 +148,7 @@ const OPUS_AUDIO_QUALITY_PARAMS = {
   usedtx: "0",
 };
 const OPUS_AUDIO_REMOVE_PARAMS = new Set(["stereo", "sprop-stereo"]);
-const ASSISTANT_CARD_VERSION = "0.1.75";
+const ASSISTANT_CARD_VERSION = "0.1.76";
 const ASSISTANT_CARD_ACCENT_HEX = "#206cff";
 const ASSISTANT_CARD_AUDIO_BUFFER_MS = 120;
 const STREAM_FADE_GROUPS = 4;
@@ -633,9 +633,18 @@ const stepTypes = [
 const addableStepTypes = stepTypes.filter(([kind]) => !["transport", "output"].includes(kind));
 
 const stepProviders = {
-  stt: ["soniox", "deepgram", "speechmatics", "gradium", "openai_cloud"],
+  stt: ["soniox", "deepgram", "speechmatics", "gradium", "local_runtime", "openai_cloud"],
   llm: ["openai_cloud", "gemini_cloud", "aws_bedrock", "openai_compatible", "ollama"],
-  tts: ["cartesia", "gradium", "google_cloud_tts", "google_streaming_tts", "elevenlabs", "openai_cloud", "soniox"],
+  tts: [
+    "cartesia",
+    "gradium",
+    "google_cloud_tts",
+    "google_streaming_tts",
+    "elevenlabs",
+    "local_runtime",
+    "openai_cloud",
+    "soniox",
+  ],
   tools: ["home_assistant_mcp", "ha_mcp", "mcp_server"],
   web_search: ["web_search"],
   output: ["gemini", "openai", "aws_nova_sonic"],
