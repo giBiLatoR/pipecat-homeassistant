@@ -40,6 +40,8 @@ DEFAULT_OPENAI_REALTIME_VOICE = "marin"
 DEFAULT_OPENAI_STT_MODEL = "gpt-4o-mini-transcribe"
 DEFAULT_OPENAI_TTS_MODEL = "gpt-4o-mini-tts"
 DEFAULT_OPENAI_TTS_VOICE = "marin"
+DEFAULT_LOCAL_LLM_API_KEY = "local"
+DEFAULT_LOCAL_LLM_MODEL = "local-model"
 DEFAULT_LOCAL_FAST_LLM_BASE_URL = "http://localhost:8081/v1"
 DEFAULT_LOCAL_THINKING_LLM_BASE_URL = "http://localhost:8082/v1"
 DEFAULT_CARTESIA_MODEL = "sonic-3.5"
@@ -379,12 +381,12 @@ def default_integrations() -> list[IntegrationConfig]:
             enabled=_env_bool("LOCAL_FAST_LLM_ENABLED", True),
             api_key=os.getenv(
                 "LOCAL_FAST_LLM_API_KEY",
-                os.getenv("LOCAL_LLM_API_KEY", ""),
+                os.getenv("LOCAL_LLM_API_KEY", DEFAULT_LOCAL_LLM_API_KEY),
             ),
             base_url=os.getenv("LOCAL_FAST_LLM_BASE_URL", DEFAULT_LOCAL_FAST_LLM_BASE_URL),
             default_model=os.getenv(
                 "LOCAL_FAST_LLM_MODEL",
-                os.getenv("LOCAL_LLM_MODEL", ""),
+                os.getenv("LOCAL_LLM_MODEL", DEFAULT_LOCAL_LLM_MODEL),
             ),
         ),
         IntegrationConfig(
@@ -394,7 +396,7 @@ def default_integrations() -> list[IntegrationConfig]:
             enabled=_env_bool("LOCAL_THINKING_LLM_ENABLED", True),
             api_key=os.getenv(
                 "LOCAL_THINKING_LLM_API_KEY",
-                os.getenv("LOCAL_LLM_API_KEY", ""),
+                os.getenv("LOCAL_LLM_API_KEY", DEFAULT_LOCAL_LLM_API_KEY),
             ),
             base_url=os.getenv(
                 "LOCAL_THINKING_LLM_BASE_URL",
@@ -402,7 +404,7 @@ def default_integrations() -> list[IntegrationConfig]:
             ),
             default_model=os.getenv(
                 "LOCAL_THINKING_LLM_MODEL",
-                os.getenv("LOCAL_LLM_MODEL", ""),
+                os.getenv("LOCAL_LLM_MODEL", DEFAULT_LOCAL_LLM_MODEL),
             ),
         ),
         IntegrationConfig(
@@ -1318,11 +1320,11 @@ def _repair_provider_defaults(config: RuntimeConfig) -> bool:
         if not integration.base_url:
             integration.base_url = os.getenv(base_url_env, base_url)
             changed = True
-        model = os.getenv(model_env, os.getenv("LOCAL_LLM_MODEL", ""))
+        model = os.getenv(model_env, os.getenv("LOCAL_LLM_MODEL", DEFAULT_LOCAL_LLM_MODEL))
         if not integration.default_model and model:
             integration.default_model = model
             changed = True
-        api_key = os.getenv(key_env, os.getenv("LOCAL_LLM_API_KEY", ""))
+        api_key = os.getenv(key_env, os.getenv("LOCAL_LLM_API_KEY", DEFAULT_LOCAL_LLM_API_KEY))
         if not integration.api_key and api_key:
             integration.api_key = api_key
             changed = True
