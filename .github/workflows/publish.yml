@@ -1,6 +1,12 @@
 name: Publish add-on image
 
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Add-on/image version to publish
+        required: true
+        default: "0.1.75"
   release:
     types:
       - published
@@ -51,6 +57,9 @@ jobs:
           if [[ "${{ github.event_name }}" == "release" ]]; then
             release_tag="${{ github.event.release.tag_name }}"
           fi
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            release_tag="v${{ inputs.version }}"
+          fi
           app_version="${release_tag#v}"
 
           {
@@ -90,6 +99,9 @@ jobs:
           release_tag="${GITHUB_REF_NAME}"
           if [[ "${{ github.event_name }}" == "release" ]]; then
             release_tag="${{ github.event.release.tag_name }}"
+          fi
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            release_tag="v${{ inputs.version }}"
           fi
           app_version="${release_tag#v}"
 
