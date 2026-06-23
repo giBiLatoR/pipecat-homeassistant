@@ -1,21 +1,21 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/kyvaith/pipecat-homeassistant/main/addons/pipecat_assist/logo.png" alt="Pipecat Assist" width="420">
+  <img src="https://raw.githubusercontent.com/giBiLatoR/pipecat-homeassistant/main/addons/pipecat_assist/logo.png" alt="Pipecat Assist" width="420">
 </p>
 
 # Pipecat Home Assistant
 
 <p align="center">
-  <a href="https://github.com/kyvaith/pipecat-homeassistant/actions/workflows/ci.yml">
-    <img alt="CI" src="https://github.com/kyvaith/pipecat-homeassistant/actions/workflows/ci.yml/badge.svg?branch=main">
+  <a href="https://github.com/giBiLatoR/pipecat-homeassistant/actions/workflows/ci.yml">
+    <img alt="CI" src="https://github.com/giBiLatoR/pipecat-homeassistant/actions/workflows/ci.yml/badge.svg?branch=main">
   </a>
-  <a href="https://github.com/kyvaith/pipecat-homeassistant/actions/workflows/publish.yml">
-    <img alt="Publish add-on image" src="https://github.com/kyvaith/pipecat-homeassistant/actions/workflows/publish.yml/badge.svg">
+  <a href="https://github.com/giBiLatoR/pipecat-homeassistant/actions/workflows/publish.yml">
+    <img alt="Publish add-on image" src="https://github.com/giBiLatoR/pipecat-homeassistant/actions/workflows/publish.yml/badge.svg">
   </a>
-  <a href="https://github.com/kyvaith/pipecat-homeassistant/releases">
-    <img alt="Latest release" src="https://img.shields.io/github/v/release/kyvaith/pipecat-homeassistant?label=release">
+  <a href="https://github.com/giBiLatoR/pipecat-homeassistant/releases">
+    <img alt="Latest release" src="https://img.shields.io/github/v/release/giBiLatoR/pipecat-homeassistant?label=release">
   </a>
   <a href="LICENSE">
-    <img alt="License" src="https://img.shields.io/github/license/kyvaith/pipecat-homeassistant">
+    <img alt="License" src="https://img.shields.io/github/license/giBiLatoR/pipecat-homeassistant">
   </a>
   <a href="https://www.home-assistant.io/">
     <img alt="Home Assistant" src="https://img.shields.io/badge/Home%20Assistant-add--on%20%2B%20integration-41BDF5?logo=homeassistant&logoColor=white">
@@ -78,7 +78,7 @@ responsive realtime experience.
    Store > Repositories**:
 
    ```text
-   https://github.com/kyvaith/pipecat-homeassistant
+   https://github.com/giBiLatoR/pipecat-homeassistant
    ```
 
 2. Add the same repository URL to **HACS > Custom repositories** as an
@@ -171,6 +171,9 @@ flowchart LR
    AWS, ElevenLabs, Google Cloud TTS HTTP fallback/Streaming,
    OpenAI-compatible endpoints, Ollama, local runtimes, and Web Search can be
    added from **Integrations**.
+   The add-on also includes **Local LLM Fast** at `http://localhost:8081/v1`
+   and **Local LLM Thinking** at `http://localhost:8082/v1` as
+   OpenAI-compatible defaults.
 4. Choose or create a pipeline. The built-in catalog includes realtime
    speech-to-speech profiles and composed realtime profiles such as
    `Soniox + OpenAI + Cartesia`, `Deepgram + Gemini + Google TTS`, and
@@ -216,6 +219,13 @@ and Gemini Live are speech-to-speech providers; OpenAI Cloud and Google Gemini
 Cloud are composed/text providers. Session Memory and Web Search are separate
 pipeline steps. Web Search selects a cloud LLM provider such as OpenAI Cloud or
 Google Gemini Cloud, while Home Assistant device control remains on MCP.
+
+For local OpenAI-compatible LLM servers, **Local LLM Fast** defaults to
+`http://localhost:8081/v1` and is used by the Local First template. **Local LLM
+Thinking** defaults to `http://localhost:8082/v1`; select it on the LLM step
+when a pipeline should use the slower/deeper model. Override URLs or model
+names with `LOCAL_FAST_LLM_BASE_URL`, `LOCAL_THINKING_LLM_BASE_URL`,
+`LOCAL_FAST_LLM_MODEL`, and `LOCAL_THINKING_LLM_MODEL`.
 
 Official `pipecat-ai-flows` support is enabled for composed realtime pipelines.
 The flow editor stores nodes, transition functions, JSON schemas, and optional

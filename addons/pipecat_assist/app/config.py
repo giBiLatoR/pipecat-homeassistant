@@ -40,6 +40,8 @@ DEFAULT_OPENAI_REALTIME_VOICE = "marin"
 DEFAULT_OPENAI_STT_MODEL = "gpt-4o-mini-transcribe"
 DEFAULT_OPENAI_TTS_MODEL = "gpt-4o-mini-tts"
 DEFAULT_OPENAI_TTS_VOICE = "marin"
+DEFAULT_LOCAL_FAST_LLM_BASE_URL = "http://localhost:8081/v1"
+DEFAULT_LOCAL_THINKING_LLM_BASE_URL = "http://localhost:8082/v1"
 DEFAULT_CARTESIA_MODEL = "sonic-3.5"
 DEFAULT_CARTESIA_VOICE = "f786b574-daa5-4673-aa0c-cbe3e8534c02"
 DEFAULT_ELEVENLABS_MODEL = "eleven_flash_v2_5"
@@ -369,6 +371,39 @@ def default_integrations() -> list[IntegrationConfig]:
             kind="openai_compatible",
             enabled=False,
             base_url="http://localhost:8000/v1",
+        ),
+        IntegrationConfig(
+            id="local-llm-fast",
+            name="Local LLM Fast",
+            kind="openai_compatible",
+            enabled=_env_bool("LOCAL_FAST_LLM_ENABLED", True),
+            api_key=os.getenv(
+                "LOCAL_FAST_LLM_API_KEY",
+                os.getenv("LOCAL_LLM_API_KEY", ""),
+            ),
+            base_url=os.getenv("LOCAL_FAST_LLM_BASE_URL", DEFAULT_LOCAL_FAST_LLM_BASE_URL),
+            default_model=os.getenv(
+                "LOCAL_FAST_LLM_MODEL",
+                os.getenv("LOCAL_LLM_MODEL", ""),
+            ),
+        ),
+        IntegrationConfig(
+            id="local-llm-thinking",
+            name="Local LLM Thinking",
+            kind="openai_compatible",
+            enabled=_env_bool("LOCAL_THINKING_LLM_ENABLED", True),
+            api_key=os.getenv(
+                "LOCAL_THINKING_LLM_API_KEY",
+                os.getenv("LOCAL_LLM_API_KEY", ""),
+            ),
+            base_url=os.getenv(
+                "LOCAL_THINKING_LLM_BASE_URL",
+                DEFAULT_LOCAL_THINKING_LLM_BASE_URL,
+            ),
+            default_model=os.getenv(
+                "LOCAL_THINKING_LLM_MODEL",
+                os.getenv("LOCAL_LLM_MODEL", ""),
+            ),
         ),
         IntegrationConfig(
             id="ollama",
@@ -1249,6 +1284,47 @@ def _repair_provider_defaults(config: RuntimeConfig) -> bool:
             changed = True
         if not openai_cloud.default_voice:
             openai_cloud.default_voice = os.getenv("OPENAI_TTS_VOICE", DEFAULT_OPENAI_TTS_VOICE)
+            changed = True
+
+    local_llm_defaults = {
+        "local-llm-fast": (
+            "Local LLM Fast",
+            "LOCAL_FAST_LLM_BASE_URL",
+            DEFAULT_LOCAL_FAST_LLM_BASE_URL,
+            "LOCAL_FAST_LLM_MODEL",
+            "LOCAL_FAST_LLM_API_KEY",
+        ),
+        "local-llm-thinking": (
+            "Local LLM Thinking",
+            "LOCAL_THINKING_LLM_BASE_URL",
+            DEFAULT_LOCAL_THINKING_LLM_BASE_URL,
+            "LOCAL_THINKING_LLM_MODEL",
+            "LOCAL_THINKING_LLM_API_KEY",
+        ),
+    }
+    for (
+        integration_id,
+        (name, base_url_env, base_url, model_env, key_env),
+    ) in local_llm_defaults.items():
+        integration = config.integration(integration_id)
+        if not integration:
+            continue
+        if integration.name != name:
+            integration.name = name
+            changed = True
+        if integration.kind != "openai_compatible":
+            integration.kind = "openai_compatible"
+            changed = True
+        if not integration.base_url:
+            integration.base_url = os.getenv(base_url_env, base_url)
+            changed = True
+        model = os.getenv(model_env, os.getenv("LOCAL_LLM_MODEL", ""))
+        if not integration.default_model and model:
+            integration.default_model = model
+            changed = True
+        api_key = os.getenv(key_env, os.getenv("LOCAL_LLM_API_KEY", ""))
+        if not integration.api_key and api_key:
+            integration.api_key = api_key
             changed = True
 
     google_tts = config.integration("google-cloud-tts")

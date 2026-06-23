@@ -54,6 +54,15 @@ Gemini is split the same way: **Google Gemini Live** is for native
 speech-to-speech pipelines, while **Google Gemini Cloud** is for composed
 pipelines that use separate STT, LLM, and TTS steps.
 
+Local OpenAI-compatible LLMs are preconfigured as **Local LLM Fast**
+(`http://localhost:8081/v1`) and **Local LLM Thinking**
+(`http://localhost:8082/v1`). The Local First template uses Local LLM Fast for
+the LLM step. Select Local LLM Thinking on that step when a pipeline should use
+the deeper model. If your server requires model names, set them in the
+integration fields or use `LOCAL_FAST_LLM_MODEL` and
+`LOCAL_THINKING_LLM_MODEL`; URLs can be overridden with
+`LOCAL_FAST_LLM_BASE_URL` and `LOCAL_THINKING_LLM_BASE_URL`.
+
 `Runtime`
 : Tune short-lived session memory, cache the MCP tool schema, enable audio
 debug captures, and inspect recent Home Assistant MCP calls made by the

@@ -11,7 +11,7 @@ on:
 env:
   ARCHITECTURES: '["amd64", "aarch64"]'
   IMAGE_NAME: pipecat-assist
-  REGISTRY_PREFIX: ghcr.io/${{ github.repository }}
+  REGISTRY_PREFIX: ghcr.io/gibilator/pipecat-homeassistant
 
 permissions:
   contents: write

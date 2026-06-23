@@ -38,8 +38,7 @@ LABEL \
     io.hass.type="app" \
     io.hass.arch="${BUILD_ARCH}" \
     org.opencontainers.image.title="Pipecat Assist" \
-    org.opencontainers.image.source="https://github.com/kyvaith/pipecat-homeassistant"
+    org.opencontainers.image.source="https://github.com/giBiLatoR/pipecat-homeassistant"
 
 WORKDIR /
 CMD ["/run.sh"]
-

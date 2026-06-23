@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/kyvaith/pipecat-homeassistant/main/addons/pipecat_assist/logo.png" alt="Pipecat Assist" width="320">
+  <img src="https://raw.githubusercontent.com/giBiLatoR/pipecat-homeassistant/main/addons/pipecat_assist/logo.png" alt="Pipecat Assist" width="320">
 </p>
 
 # Pipecat Assist
@@ -19,9 +19,10 @@ also includes composed realtime profiles such as `Soniox + OpenAI + Cartesia`,
 ElevenLabs`. Provider settings are configured in **Integrations**: realtime
 providers, cloud STT/LLM/TTS providers, Web Search, and Home Assistant MCP are
 kept separate. Google Imagen and fal Image Generation integrations can be used
-for Home Assistant image-generation tasks. Session Memory and Web Search are
-visible pipeline steps, and official Pipecat Flows can be enabled inside
-composed realtime pipelines.
+for Home Assistant image-generation tasks. Local OpenAI-compatible LLM defaults
+are included for `http://localhost:8081/v1` and `http://localhost:8082/v1`.
+Session Memory and Web Search are visible pipeline steps, and official Pipecat
+Flows can be enabled inside composed realtime pipelines.
 
 The built-in Home Assistant MCP integration uses the Supervisor connection
 automatically. The optional HA MCP Server Add-on integration is also detected
