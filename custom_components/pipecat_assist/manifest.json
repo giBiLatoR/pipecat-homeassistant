@@ -1,11 +1,11 @@
 {
   "domain": "pipecat_assist",
   "name": "Pipecat Assist",
-  "version": "0.1.74",
-  "codeowners": ["@kyvaith"],
+  "version": "0.1.75",
+  "codeowners": ["@giBiLatoR"],
   "config_flow": true,
   "dependencies": ["ai_task", "conversation", "frontend", "lovelace", "stt", "tts"],
-  "documentation": "https://github.com/kyvaith/pipecat-homeassistant",
+  "documentation": "https://github.com/giBiLatoR/pipecat-homeassistant",
   "integration_type": "service",
   "iot_class": "local_push",
   "requirements": []
