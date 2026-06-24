@@ -63,6 +63,7 @@ from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.utils.time import time_now_iso8601
 from pipecat.workers.runner import WorkerRunner
 
+from app.stt_filters import is_stt_noise
 from app.config import (
     COMPOSED_STEP_PROVIDER_KINDS,
     DEFAULT_AWS_NOVA_SONIC_MODEL,
@@ -1988,14 +1989,18 @@ class _LocalRuntimeSTTService(SegmentedSTTService):
         finally:
             await self.stop_processing_metrics()
 
-        if transcript:
-            logger.debug("Local runtime transcription: [{}]", transcript)
-            yield TranscriptionFrame(
-                transcript,
-                self._user_id,
-                time_now_iso8601(),
-                language if isinstance(language, Language) else None,
-            )
+        if not transcript:
+            return
+        if is_stt_noise(transcript):
+            logger.debug("Dropping STT silence/noise hallucination: [{}]", transcript)
+            return
+        logger.debug("Local runtime transcription: [{}]", transcript)
+        yield TranscriptionFrame(
+            transcript,
+            self._user_id,
+            time_now_iso8601(),
+            language if isinstance(language, Language) else None,
+        )
 
 
 class _LocalRuntimeTTSService(TTSService):
@@ -4418,17 +4423,19 @@ def _composed_vad_analyzer(flow: FlowConfig):
     from pipecat.audio.vad.vad_analyzer import VADParams
 
     stop_secs_by_eagerness = {
-        "high": 0.2,
-        "medium": 0.2,
-        "auto": 0.2,
-        "low": 0.2,
+        "high": 0.4,
+        "medium": 0.6,
+        "auto": 0.6,
+        "low": 0.8,
     }
     return SileroVADAnalyzer(
         params=VADParams(
-            confidence=0.5,
-            start_secs=0.05,
-            stop_secs=stop_secs_by_eagerness.get(flow.vad_eagerness, 0.45),
-            min_volume=0.05,
+            # pipecat defaults — the previous 0.5/0.05/0.05 were so sensitive that
+            # silence and background voices triggered turns and interrupted the bot.
+            confidence=0.7,
+            start_secs=0.2,
+            stop_secs=stop_secs_by_eagerness.get(flow.vad_eagerness, 0.6),
+            min_volume=0.6,
         )
     )
 
