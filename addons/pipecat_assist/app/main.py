@@ -5069,9 +5069,14 @@ async def run_bot(
 
         initial_flow_node = None
         active_tools_schema = None if _flow_enabled(flow) else tools_schema
-        context_messages = [{"role": "developer", "content": _effective_instructions(flow)}]
+        # Local OpenAI-compatible models (e.g. Qwen via llama-server) enforce a
+        # chat template that requires a `system` message first and rejects the
+        # `developer` role ("System message must be at the beginning"). OpenAI
+        # accepts `system` too, so use it for both. The greeting is the bot's
+        # opening line, so it is an `assistant` turn (a 2nd system msg re-trips it).
+        context_messages = [{"role": "system", "content": _effective_instructions(flow)}]
         if flow.greeting.strip():
-            context_messages.append({"role": "developer", "content": flow.greeting})
+            context_messages.append({"role": "assistant", "content": flow.greeting})
         context_messages = SESSION_MEMORY.restore(
             client_id,
             context_messages,
