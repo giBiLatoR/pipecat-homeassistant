@@ -30,11 +30,15 @@ from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.frames.frames import (
     ErrorFrame,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
     LLMRunFrame,
+    LLMTextFrame,
     TranscriptionFrame,
     TTSAudioRawFrame,
     URLImageRawFrame,
 )
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -63,7 +67,7 @@ from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.utils.time import time_now_iso8601
 from pipecat.workers.runner import WorkerRunner
 
-from app.stt_filters import is_stt_noise
+from app.stt_filters import ReasoningStripper, is_stt_noise
 from app.config import (
     COMPOSED_STEP_PROVIDER_KINDS,
     DEFAULT_AWS_NOVA_SONIC_MODEL,
@@ -2064,6 +2068,39 @@ class _LocalRuntimeTTSService(TTSService):
             await self.stop_ttfb_metrics()
 
 
+class _StripReasoningTags(FrameProcessor):
+    """Remove <think>...</think> reasoning blocks from the assistant token stream.
+
+    The local Qwen ACE model emits a (usually empty) <think></think> even with
+    reasoning disabled. Placed between the LLM and TTS, this strips it from the
+    spoken audio, the displayed transcript, and the cached assistant context,
+    while preserving token streaming for the real reply.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._stripper = ReasoningStripper()
+
+    async def process_frame(self, frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if isinstance(frame, LLMFullResponseStartFrame):
+            self._stripper.reset()
+            await self.push_frame(frame, direction)
+            return
+        if isinstance(frame, LLMTextFrame):
+            clean = self._stripper.feed(frame.text)
+            if clean:
+                await self.push_frame(LLMTextFrame(clean), direction)
+            return
+        if isinstance(frame, LLMFullResponseEndFrame):
+            tail = self._stripper.flush()
+            if tail:
+                await self.push_frame(LLMTextFrame(tail), direction)
+            await self.push_frame(frame, direction)
+            return
+        await self.push_frame(frame, direction)
+
+
 def _google_tts_language_code(voice: str, language: str) -> str:
     parts = [part for part in (voice or "").split("-") if part]
     if len(parts) >= 2:
@@ -2755,6 +2792,9 @@ def _transport_params(flow: FlowConfig) -> dict[str, Any]:
         "webrtc": lambda: TransportParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
+            # Match Kokoro's native 24 kHz output so TTS audio is not resampled
+            # to a lower rate, which was causing warbly playback.
+            audio_out_sample_rate=24000,
             video_in_enabled=flow.video_enabled,
         ),
     }
@@ -5129,7 +5169,7 @@ async def run_bot(
             processors.append(vad_processor)
         if audio_debug:
             processors.append(audio_debug.input_recorder)
-        processors.extend([stt, context_aggregator.user(), llm, tts])
+        processors.extend([stt, context_aggregator.user(), llm, _StripReasoningTags(), tts])
         if audio_debug:
             processors.append(audio_debug.output_recorder)
         processors.extend([transport.output(), context_aggregator.assistant()])
