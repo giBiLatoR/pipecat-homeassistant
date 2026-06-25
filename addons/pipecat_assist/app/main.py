@@ -4639,9 +4639,12 @@ def _build_llm_service(config: RuntimeConfig, flow: FlowConfig, tools_schema=Non
     if integration.kind == "openai_compatible":
         from pipecat.services.openai.llm import OpenAILLMService
 
+        # No system_instruction here: pipecat double-adds it (service setting +
+        # a materialized context system message), and strict local chat templates
+        # (Qwen via llama-server) 500 on two system messages. The composed pipeline
+        # supplies the single system message via the context instead (see run_bot).
         settings_kwargs: dict[str, Any] = {
             "model": model or integration.default_model,
-            "system_instruction": _effective_instructions(flow),
         }
         if flow.max_output_tokens:
             settings_kwargs["max_tokens"] = flow.max_output_tokens
@@ -5069,13 +5072,15 @@ async def run_bot(
 
         initial_flow_node = None
         active_tools_schema = None if _flow_enabled(flow) else tools_schema
-        # _build_llm_service already injects the system prompt via
-        # settings.system_instruction, so it must NOT also go in the context —
-        # a second system message makes local chat templates (Qwen via
-        # llama-server) raise "System message must be at the beginning" and 500
-        # every completion. Seed only the greeting (the bot's opening line = an
-        # assistant turn); the service supplies the single, leading system msg.
+        # Local OpenAI-compatible models (Qwen via llama-server) use a strict chat
+        # template that rejects two system messages. pipecat double-adds the system
+        # prompt when the LLM service carries system_instruction, so for that
+        # provider we drop it from the service (_build_llm_service) and supply ONE
+        # leading system message here. Cloud providers keep the service's
+        # system_instruction, so they must NOT also get one in the context.
         context_messages = []
+        if llm_integration and llm_integration.kind == "openai_compatible":
+            context_messages.append({"role": "system", "content": _effective_instructions(flow)})
         if flow.greeting.strip():
             context_messages.append({"role": "assistant", "content": flow.greeting})
         context_messages = SESSION_MEMORY.restore(
@@ -5152,7 +5157,12 @@ async def run_bot(
             logger.info("Client connected to composed flow {}", flow.id)
             if flow_manager and initial_flow_node:
                 await flow_manager.initialize(initial_flow_node)
-            elif flow.greeting.strip():
+            elif flow.greeting.strip() and not (
+                llm_integration and llm_integration.kind == "openai_compatible"
+            ):
+                # Skip the greeting auto-run for strict local models: it would invoke
+                # the tool-LLM with no user message, which the Qwen template rejects
+                # ("No user query found in messages"). The greeting still shows on the card.
                 await worker.queue_frames([LLMRunFrame()])
 
         @transport.event_handler("on_client_disconnected")
